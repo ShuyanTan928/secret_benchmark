@@ -1,0 +1,5 @@
+model: "Qwen/Qwen1.5-32B-Chat"
+max_tokens: 1024
+temperature: 0.8
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.9

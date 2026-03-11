@@ -1,0 +1,10 @@
+benchmark:
+  n_samples: 200
+  secret_clues_range: [3, 6]
+  noise_rounds_range: [5, 15]
+  snr_ratios: [0.1, 0.2, 0.5]
+  emails_per_dialogue: [2, 4]
+
+output:
+  dataset_dir: "outputs/datasets"
+  results_dir: "outputs/results"
