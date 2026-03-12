@@ -14,6 +14,7 @@ class EmailDialogue(BaseModel):
     topic: str
     is_secret_clue: bool
     clue_index: Optional[int] = None
+    clue_description: Optional[str] = None
     emails: List[EmailTurn]
 
 

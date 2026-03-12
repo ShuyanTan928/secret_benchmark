@@ -16,7 +16,7 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="Qwen/Qwen1.5-32B-Chat")
+    p.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--dataset", required=True)
     p.add_argument("--output", default="outputs/results/run1.json")

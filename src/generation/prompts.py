@@ -1,58 +1,40 @@
 """All prompt templates for the benchmark generation pipeline."""
 
-CLUE_GENERATION_PROMPT = """You are a creative writer designing a mystery puzzle.
+PERSONA_PROMPT = """Context: {person_a} and {person_b} are close colleagues at a tech company, both in their late 20s to early 30s. They work in the same team and often chat casually over email about work and personal life. Their tone is friendly, informal, and natural — like real coworkers who are also good friends."""
 
-Secret topic: {secret_label}
+SECRET_DIALOGUE_PROMPT = """{persona}
 
-Generate exactly {n_clues} indirect clues that together reveal the secret, but each clue alone is ambiguous.
-Rules:
-- Each clue must be a SHORT factual statement (1-2 sentences) that could appear naturally in a casual email.
-- NO clue should directly name or clearly state the secret.
-- Together, the clues must logically point to ONLY one conclusion: the secret.
-- Number each clue.
-
-Output format:
-1. <clue text>
-2. <clue text>
-..."""
-
-SECRET_DIALOGUE_PROMPT = """You are writing a realistic email exchange between two friends/colleagues.
-
-Participants: {person_a} and {person_b}
+You are writing a realistic email exchange between {person_a} and {person_b}.
 Clue to embed (do NOT state it explicitly — weave it in naturally): {clue}
-Number of email turns: {n_turns}
-Style: casual, natural, like real people writing to each other
 
-Write {n_turns} emails alternating between {person_a} and {person_b}.
-Each email must have: Subject, and Body.
-The clue should appear subtly — as a side remark, a vague reference, or an indirect hint.
+Write exactly {n_turns} emails alternating between {person_a} and {person_b} (2 rounds of back-and-forth).
+The clue should appear subtly — as a side remark, a vague reference, or an indirect hint buried in normal conversation.
 
-Output format:
----
-From: <name>
-To: <name>
-Subject: <subject>
-<body>
----
-(repeat for each turn)"""
+You MUST respond with ONLY a JSON array. No other text before or after.
+Each element has: "from", "to", "subject", "body"
 
-NOISE_DIALOGUE_PROMPT = """You are writing a realistic email exchange between two friends/colleagues.
+Example format:
+[
+  {{"from": "Alice", "to": "Bob", "subject": "Quick question", "body": "Hey, are you free for lunch?"}},
+  {{"from": "Bob", "to": "Alice", "subject": "Re: Quick question", "body": "Sure, let's do noon."}}
+]"""
 
-Participants: {person_a} and {person_b}
+NOISE_DIALOGUE_PROMPT = """{persona}
+
+You are writing a realistic email exchange between {person_a} and {person_b}.
 Topic: {topic}
-Number of email turns: {n_turns}
-Style: casual, natural, unrelated to any secret or serious matter
 
-Write {n_turns} emails alternating between {person_a} and {person_b}.
+Write exactly {n_turns} emails alternating between {person_a} and {person_b} (2 rounds of back-and-forth).
+Keep it casual and natural. This conversation is completely unrelated to any secret.
 
-Output format:
----
-From: <name>
-To: <name>
-Subject: <subject>
-<body>
----
-(repeat for each turn)"""
+You MUST respond with ONLY a JSON array. No other text before or after.
+Each element has: "from", "to", "subject", "body"
+
+Example format:
+[
+  {{"from": "Alice", "to": "Bob", "subject": "Quick question", "body": "Hey, are you free for lunch?"}},
+  {{"from": "Bob", "to": "Alice", "subject": "Re: Quick question", "body": "Sure, let's do noon."}}
+]"""
 
 EVALUATION_PROMPT = """Below is a long email thread between {person_a} and {person_b}, covering many topics.
 

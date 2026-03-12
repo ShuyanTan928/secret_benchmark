@@ -10,7 +10,7 @@ from typing import List, Union
 class VLLMEngine:
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen1.5-32B-Chat",
+        model_name: str = "Qwen/Qwen3.5-35B-A3B",
         tensor_parallel_size: int = 1,
         max_model_len: int = 32768,
         gpu_memory_utilization: float = 0.9,
