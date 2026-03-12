@@ -1,16 +1,14 @@
 """
 vLLM inference engine wrapper.
-Unsloth note: Unsloth is for training (QLoRA/LoRA) only — not inference.
-Workflow if fine-tuning: Unsloth → export HF format → serve with vLLM.
 """
 from vllm import LLM, SamplingParams
-from typing import List, Union
+from typing import List, Union, Optional
 
 
 class VLLMEngine:
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3.5-35B-A3B",
+        model_name: str = "Qwen/Qwen3-14B",
         tensor_parallel_size: int = 1,
         max_model_len: int = 32768,
         gpu_memory_utilization: float = 0.9,
@@ -30,9 +28,15 @@ class VLLMEngine:
         max_tokens: int = 1024,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        stop: Optional[List[str]] = None,
     ) -> List[str]:
         if isinstance(prompts, str):
             prompts = [prompts]
-        params = SamplingParams(max_tokens=max_tokens, temperature=temperature, top_p=top_p)
+        params = SamplingParams(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+        )
         outputs = self.llm.generate(prompts, params)
         return [o.outputs[0].text.strip() for o in outputs]

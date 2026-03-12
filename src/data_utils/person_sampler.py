@@ -3,19 +3,16 @@ from pathlib import Path
 
 NAMES_PATH = Path("data/names.json")
 
-DEFAULT_NAMES = [
-    "Alice", "Bob", "Carol", "David", "Emma", "Frank", "Grace", "Henry",
-    "Iris", "James", "Karen", "Leo", "Mia", "Nathan", "Olivia", "Paul",
-    "Quinn", "Rachel", "Sam", "Tina", "Uma", "Victor", "Wendy", "Xander",
-    "Yara", "Zoe", "Aaron", "Bella", "Chris", "Diana",
-]
 
-def load_names() -> list:
-    if NAMES_PATH.exists():
-        return json.loads(NAMES_PATH.read_text())
-    return DEFAULT_NAMES
+def load_names() -> dict:
+    if not NAMES_PATH.exists():
+        raise FileNotFoundError(f"{NAMES_PATH} not found.")
+    return json.loads(NAMES_PATH.read_text())
+
 
 def sample_pair() -> tuple[str, str]:
+    """Return (male_name, female_name). Alex -> male, Brooke -> female."""
     names = load_names()
-    a, b = random.sample(names, 2)
-    return a, b
+    male = random.choice(names["male"])
+    female = random.choice(names["female"])
+    return male, female

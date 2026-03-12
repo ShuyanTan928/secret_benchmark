@@ -1,6 +1,13 @@
-[
-  "Alice", "Bob", "Carol", "David", "Emma", "Frank", "Grace", "Henry",
-  "Iris", "James", "Karen", "Leo", "Mia", "Nathan", "Olivia", "Paul",
-  "Quinn", "Rachel", "Sam", "Tina", "Uma", "Victor", "Wendy", "Xander",
-  "Yara", "Zoe", "Aaron", "Bella", "Chris", "Diana"
-]
+
+{
+  "male": [
+    "James", "David", "Michael", "Daniel", "Ryan",
+    "Nathan", "Chris", "Kevin", "Marcus", "Tyler",
+    "Brandon", "Jason", "Eric", "Andrew", "Justin"
+  ],
+  "female": [
+    "Emma", "Olivia", "Sophia", "Rachel", "Mia",
+    "Tina", "Grace", "Karen", "Diana", "Bella",
+    "Hannah", "Lauren", "Chloe", "Nicole", "Jessica"
+  ]
+}

@@ -1,10 +1,10 @@
 import uuid, json, re
-from src.generation.prompts import SECRET_DIALOGUE_PROMPT, PERSONA_PROMPT
+from src.generation.prompts import SECRET_DIALOGUE_PROMPT, PERSONA_PROMPT, PLACEHOLDER_A, PLACEHOLDER_B
 from src.data_utils.schema import EmailDialogue, EmailTurn
 
 
-def _parse_emails_json(raw: str, person_a: str, person_b: str) -> list[EmailTurn]:
-    """Parse LLM output as JSON array. Falls back to regex extraction if JSON fails."""
+def _parse_emails_json(raw: str) -> list[EmailTurn]:
+    """Parse LLM output as JSON array."""
     text = raw.strip()
 
     # Remove markdown code fences if present
@@ -21,8 +21,8 @@ def _parse_emails_json(raw: str, person_a: str, person_b: str) -> list[EmailTurn
         turns = []
         for e in emails:
             turns.append(EmailTurn(
-                sender=e.get("from", person_a),
-                recipient=e.get("to", person_b),
+                sender=e.get("from", PLACEHOLDER_A),
+                recipient=e.get("to", PLACEHOLDER_B),
                 subject=e.get("subject", ""),
                 body=e.get("body", ""),
             ))
@@ -34,8 +34,8 @@ def _parse_emails_json(raw: str, person_a: str, person_b: str) -> list[EmailTurn
             try:
                 e = json.loads(obj_match.group(0))
                 turns.append(EmailTurn(
-                    sender=e.get("from", person_a),
-                    recipient=e.get("to", person_b),
+                    sender=e.get("from", PLACEHOLDER_A),
+                    recipient=e.get("to", PLACEHOLDER_B),
                     subject=e.get("subject", ""),
                     body=e.get("body", ""),
                 ))
@@ -44,32 +44,40 @@ def _parse_emails_json(raw: str, person_a: str, person_b: str) -> list[EmailTurn
         return turns
 
 
-def generate_secret_dialogues(
-    engine, person_a: str, person_b: str,
-    clue_breakdown: list[str], n_turns: int = 4,
-) -> list[EmailDialogue]:
-    """Generate one email dialogue per clue in clue_breakdown."""
-    dialogues = []
-    for idx, clue in enumerate(clue_breakdown):
-        persona = PERSONA_PROMPT.format(person_a=person_a, person_b=person_b)
-        prompt = SECRET_DIALOGUE_PROMPT.format(
-            persona=persona, person_a=person_a, person_b=person_b,
-            clue=clue, n_turns=n_turns,
-        )
-        raw = engine.generate(prompt, max_tokens=1024, temperature=0.85)[0]
-        emails = _parse_emails_json(raw, person_a, person_b)
+def generate_secret_dialogue(engine, clue: str) -> EmailDialogue:
+    """Generate one email dialogue for a single clue. Uses PERSON_A/PERSON_B placeholders."""
+    persona = PERSONA_PROMPT
+    prompt = SECRET_DIALOGUE_PROMPT.format(persona=persona, clue=clue)
+    raw = engine.generate(prompt, max_tokens=512, temperature=0.85, stop=["\n\n[", "\n\n{"])[0]
+    emails = _parse_emails_json(raw)
 
-        # Retry once if parsing failed
-        if len(emails) == 0:
-            raw = engine.generate(prompt, max_tokens=1024, temperature=0.85)[0]
-            emails = _parse_emails_json(raw, person_a, person_b)
+    # Retry once if parsing failed
+    if len(emails) == 0:
+        raw = engine.generate(prompt, max_tokens=512, temperature=0.85)[0]
+        emails = _parse_emails_json(raw)
 
-        dialogues.append(EmailDialogue(
-            dialogue_id=str(uuid.uuid4())[:8],
-            topic=f"[SECRET_CLUE_{idx + 1}]",
-            is_secret_clue=True,
-            clue_index=idx + 1,
-            clue_description=clue,
-            emails=emails,
-        ))
-    return dialogues
+    # Only keep first 2 emails to enforce one round of back-and-forth
+    emails = emails[:2]
+
+    # Only keep first 2 emails
+    emails = emails[:2]
+
+    return EmailDialogue(
+        dialogue_id=str(uuid.uuid4())[:8],
+        topic="[SECRET_CLUE]",
+        is_secret_clue=True,
+        clue_description=clue,
+        emails=emails,
+    )
+
+
+def generate_all_secret_dialogues(engine, secrets: list[dict]) -> dict:
+    """Generate one dialogue per clue for all secrets. Returns {secret_id: [dialogues]}."""
+    result = {}
+    for secret in secrets:
+        dialogues = []
+        for clue in secret["clue_breakdown"]:
+            dlg = generate_secret_dialogue(engine, clue)
+            dialogues.append(dlg)
+        result[secret["id"]] = dialogues
+    return result

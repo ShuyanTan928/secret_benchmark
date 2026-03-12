@@ -1,39 +1,54 @@
 """All prompt templates for the benchmark generation pipeline."""
 
-PERSONA_PROMPT = """Context: {person_a} and {person_b} are close colleagues at a tech company, both in their late 20s to early 30s. They work in the same team and often chat casually over email about work and personal life. Their tone is friendly, informal, and natural — like real coworkers who are also good friends."""
+# Default placeholder names used during generation.
+# These get replaced with random names during the assembly step.
+PLACEHOLDER_A = "Alex"
+PLACEHOLDER_B = "Brooke"
 
-SECRET_DIALOGUE_PROMPT = """{persona}
+PERSONA_PROMPT = f"""Context: {PLACEHOLDER_A} and {PLACEHOLDER_B} are close colleagues at a tech company, both in their late 20s to early 30s. They work in the same team and often chat casually over email about work and personal life. Their tone is friendly, informal, and natural — like real coworkers who are also good friends."""
 
-You are writing a realistic email exchange between {person_a} and {person_b}.
-Clue to embed (do NOT state it explicitly — weave it in naturally): {clue}
+SECRET_DIALOGUE_PROMPT = """/no_think
+{persona}
 
-Write exactly {n_turns} emails alternating between {person_a} and {person_b} (2 rounds of back-and-forth).
-The clue should appear subtly — as a side remark, a vague reference, or an indirect hint buried in normal conversation.
+Write a short, realistic email exchange between Alex and Brooke (2 emails total: one message and one reply).
+
+The email should be about an everyday work or life topic (e.g., a meeting, lunch, a deadline, weekend plans — pick one naturally). Somewhere in the conversation, one of them casually mentions the following background detail as a BRIEF side comment — not as the main topic:
+
+Background detail to include: {clue}
+
+CRITICAL RULES:
+- The background detail must appear as a single short phrase or clause buried inside a longer sentence about something else. It should feel like an afterthought.
+- The main topic of the email must be something COMPLETELY DIFFERENT from the background detail.
+- Do NOT draw any attention to the background detail. No follow-up questions about it, no reactions to it, no elaboration.
+- The reply should respond to the MAIN topic only, not to the background detail.
+
+BAD example (too obvious):
+  "Hey, I approved your promotion request today! Congrats!"
+GOOD example (subtle):
+  "Hey, can you send me the slide deck before 3? Also I submitted that paperwork you asked about, should be all set."
 
 You MUST respond with ONLY a JSON array. No other text before or after.
-Each element has: "from", "to", "subject", "body"
 
-Example format:
 [
-  {{"from": "Alice", "to": "Bob", "subject": "Quick question", "body": "Hey, are you free for lunch?"}},
-  {{"from": "Bob", "to": "Alice", "subject": "Re: Quick question", "body": "Sure, let's do noon."}}
+  {{"from": "Alex", "to": "Brooke", "subject": "...", "body": "..."}},
+  {{"from": "Brooke", "to": "Alex", "subject": "...", "body": "..."}}
 ]"""
 
-NOISE_DIALOGUE_PROMPT = """{persona}
+NOISE_DIALOGUE_PROMPT = """/no_think
+{persona}
 
-You are writing a realistic email exchange between {person_a} and {person_b}.
+Write a realistic email exchange between Alex and Brooke ({n_turns} emails total, alternating between them).
+
 Topic: {topic}
 
-Write exactly {n_turns} emails alternating between {person_a} and {person_b} (2 rounds of back-and-forth).
-Keep it casual and natural. This conversation is completely unrelated to any secret.
+Rules:
+- Keep it casual and natural. This is a completely ordinary, mundane conversation.
 
 You MUST respond with ONLY a JSON array. No other text before or after.
-Each element has: "from", "to", "subject", "body"
 
-Example format:
 [
-  {{"from": "Alice", "to": "Bob", "subject": "Quick question", "body": "Hey, are you free for lunch?"}},
-  {{"from": "Bob", "to": "Alice", "subject": "Re: Quick question", "body": "Sure, let's do noon."}}
+  {{"from": "Alex", "to": "Brooke", "subject": "...", "body": "..."}},
+  {{"from": "Brooke", "to": "Alex", "subject": "...", "body": "..."}}
 ]"""
 
 EVALUATION_PROMPT = """Below is a long email thread between {person_a} and {person_b}, covering many topics.
