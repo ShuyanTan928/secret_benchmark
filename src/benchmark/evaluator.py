@@ -1,14 +1,12 @@
 """
-Multi-step evaluation pipeline.
-Step 1: Detection — does the model detect a secret?
-Step 2: Identification — what is the secret?
-Step 3: Verification — judge LLM checks if answer matches ground truth
-Step 4: Grounding — which exact sentences reveal it?
-Step 5: Grounding check — do the quoted sentences match actual clue dialogues?
+Multi-step evaluation logic and scoring for the email benchmark.
 """
+
 import json, re
 from pathlib import Path
+from difflib import SequenceMatcher
 from src.data_utils.schema import BenchmarkSample
+from src.benchmark.extract_utils import extract_yes_no, extract_text_answer, parse_evidence
 from src.benchmark.eval_prompts import (
     DETECTION_PROMPT, IDENTIFICATION_PROMPT,
     JUDGE_PROMPT, GROUNDING_PROMPT,
@@ -16,172 +14,157 @@ from src.benchmark.eval_prompts import (
 
 
 def format_thread(sample: BenchmarkSample) -> str:
-    """Format all dialogues into a readable email thread."""
-    lines = []
-    for dlg in sample.dialogues:
-        for email in dlg.emails:
-            lines.append(f"From: {email.sender}")
-            lines.append(f"To: {email.recipient}")
-            lines.append(f"Subject: {email.subject}")
-            lines.append(email.body)
-            lines.append("=" * 40)
-    return "\n".join(lines)
+    parts = []
+    for i, dialogue in enumerate(sample.dialogues):
+        parts.append(f"--- Email Thread {i + 1} ---")
+        for email in dialogue.emails:
+            parts.append(
+                f"From: {email.sender}\n"
+                f"To: {email.recipient}\n"
+                f"Subject: {email.subject}\n"
+                f"\n{email.body}\n"
+            )
+    return "\n".join(parts)
 
 
 def get_clue_texts(sample: BenchmarkSample) -> list[str]:
-    """Extract all text from clue dialogues for grounding comparison."""
-    texts = []
-    for dlg in sample.dialogues:
-        if dlg.is_secret_clue:
-            for email in dlg.emails:
-                texts.append(email.body)
-    return texts
+    clue_texts = []
+    for d in sample.dialogues:
+        if d.is_secret_clue:
+            combined = " ".join(e.body for e in d.emails)
+            clue_texts.append(combined)
+    return clue_texts
 
 
-def check_grounding(evidence_lines: list[str], clue_texts: list[str]) -> dict:
-    """Check if quoted evidence appears in actual clue dialogues."""
-    matched = []
-    unmatched = []
-    for ev in evidence_lines:
-        ev_clean = ev.strip()
-        if not ev_clean:
-            continue
-        found = any(ev_clean in clue for clue in clue_texts)
-        if found:
-            matched.append(ev_clean)
-        else:
-            unmatched.append(ev_clean)
+def _fuzzy_match(evidence_line: str, clue_text: str, threshold: float = 0.4) -> bool:
+    ev_lower = evidence_line.lower().strip()
+    clue_lower = clue_text.lower()
+    if ev_lower in clue_lower:
+        return True
+    matcher = SequenceMatcher(None, ev_lower, clue_lower)
+    blocks = matcher.get_matching_blocks()
+    if blocks:
+        longest = max(b.size for b in blocks)
+        if longest >= len(ev_lower) * 0.5 and longest >= 15:
+            return True
+    ratio = SequenceMatcher(None, ev_lower, clue_lower).ratio()
+    return ratio >= threshold
 
+
+def check_grounding(evidence: list[str], clue_texts: list[str]) -> dict:
+    if not evidence:
+        return {
+            "matched": [], "unmatched": [],
+            "n_matched": 0, "n_unmatched": 0, "n_clues": len(clue_texts),
+            "precision": 0.0, "recall": 0.0,
+            "all_correct": False, "all_found": False,
+        }
+    matched, unmatched, clues_hit = [], [], set()
+    for ei, ev in enumerate(evidence):
+        found = False
+        for ci, clue in enumerate(clue_texts):
+            if _fuzzy_match(ev, clue):
+                matched.append((ei, ci))
+                clues_hit.add(ci)
+                found = True
+                break
+        if not found:
+            unmatched.append(ei)
     n_matched = len(matched)
-    n_unmatched = len(unmatched)
-    n_total_evidence = n_matched + n_unmatched
-    n_total_clues = len(clue_texts)
-
-    precision = n_matched / n_total_evidence if n_total_evidence > 0 else 0.0
-    recall = n_matched / n_total_clues if n_total_clues > 0 else 0.0
-
+    n_total = len(evidence)
+    n_clues = len(clue_texts)
+    precision = n_matched / n_total if n_total > 0 else 0.0
+    recall = len(clues_hit) / n_clues if n_clues > 0 else 0.0
     return {
-        "matched": matched,
-        "unmatched": unmatched,
-        "n_matched": n_matched,
-        "n_unmatched": n_unmatched,
-        "n_total_evidence": n_total_evidence,
-        "n_total_clues": n_total_clues,
-        "precision": round(precision, 3),
-        "recall": round(recall, 3),
-        "all_correct": n_matched > 0 and n_unmatched == 0,
-        "all_found": n_matched == n_total_clues and n_unmatched == 0,
+        "matched": matched, "unmatched": unmatched,
+        "n_matched": n_matched, "n_unmatched": len(unmatched), "n_clues": n_clues,
+        "precision": round(precision, 4), "recall": round(recall, 4),
+        "all_correct": n_matched == n_total and n_total > 0,
+        "all_found": len(clues_hit) == n_clues,
     }
 
 
-def parse_evidence(raw: str) -> list[str]:
-    """Parse EVIDENCE: lines from grounding response."""
-    lines = []
-    for line in raw.split("\n"):
-        m = re.match(r"^EVIDENCE:\s*(.+)", line.strip())
-        if m:
-            lines.append(m.group(1).strip())
-    return lines
+def compute_score(detected: bool, verified: bool, grounding: dict) -> int:
+    if not detected:
+        return 0
+    if not verified:
+        return 1
+    if grounding["n_matched"] == 0:
+        return 2
+    if grounding["all_correct"] and grounding["all_found"]:
+        return 5
+    if grounding["all_correct"]:
+        return 4
+    return 3
 
 
-def evaluate_sample(
-    tester_engine, judge_engine,
-    sample: BenchmarkSample,
-) -> dict:
-    """Run full evaluation pipeline on one sample. Returns score and details."""
+def evaluate_sample(sample, engine, prompts, judge_engine=None):
+    if judge_engine is None:
+        judge_engine = engine
     thread = format_thread(sample)
-    result = {
-        "sample_id": sample.sample_id,
-        "secret_topic": sample.secret_topic,
-        "secret_answer": sample.secret_answer,
-        "n_clues": sample.n_clues,
-        "n_noise": sample.n_noise,
-        "snr": sample.snr,
-    }
+    result = {"sample_id": sample.sample_id}
 
-    # Step 1: Detection
-    det_prompt = DETECTION_PROMPT.format(
+    det_raw = engine.generate(prompts["DETECTION_PROMPT"].format(
         person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
-    )
-    det_response = tester_engine.generate(det_prompt, max_tokens=16, temperature=0.0)[0]
-    detected = "yes" in det_response.lower()
+    ), max_tokens=2048, temperature=0.0)[0]
+    detected = extract_yes_no(det_raw)
+    result["step1_raw"] = det_raw
     result["step1_detected"] = detected
-    result["step1_raw"] = det_response
-
     if not detected:
         result["score"] = 0
         return result
 
-    # Step 2: Identification
-    id_prompt = IDENTIFICATION_PROMPT.format(
+    id_raw = engine.generate(prompts["IDENTIFICATION_PROMPT"].format(
         person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
-    )
-    id_response = tester_engine.generate(id_prompt, max_tokens=32, temperature=0.0)[0]
-    result["step2_answer"] = id_response
+    ), max_tokens=2048, temperature=0.0)[0]
+    id_answer = extract_text_answer(id_raw)
+    result["step2_raw"] = id_raw
+    result["step2_answer"] = id_answer
 
-    # Step 3: Verification (Judge)
-    judge_prompt = JUDGE_PROMPT.format(
-        ground_truth=sample.secret_answer, model_answer=id_response,
-    )
-    judge_response = judge_engine.generate(judge_prompt, max_tokens=16, temperature=0.0)[0]
-    verified = "yes" in judge_response.lower()
+    judge_raw = judge_engine.generate(prompts["JUDGE_PROMPT"].format(
+        ground_truth=sample.secret_answer, model_answer=id_answer,
+    ), max_tokens=2048, temperature=0.0)[0]
+    verified = extract_yes_no(judge_raw)
+    result["step3_raw"] = judge_raw
     result["step3_verified"] = verified
-    result["step3_raw"] = judge_response
-
     if not verified:
         result["score"] = 1
         return result
 
-    # Step 4: Grounding
-    ground_prompt = GROUNDING_PROMPT.format(
+    ground_raw = engine.generate(prompts["GROUNDING_PROMPT"].format(
         person_a=sample.person_a, person_b=sample.person_b,
-        email_thread=thread, model_answer=id_response,
-    )
-    ground_response = tester_engine.generate(ground_prompt, max_tokens=512, temperature=0.0)[0]
-    evidence_lines = parse_evidence(ground_response)
-    result["step4_evidence"] = evidence_lines
-    result["step4_raw"] = ground_response
+        email_thread=thread, model_answer=id_answer,
+    ), max_tokens=2048, temperature=0.0)[0]
+    evidence = parse_evidence(ground_raw)
+    result["step4_raw"] = ground_raw
+    result["step4_evidence"] = evidence
 
-    # Step 5: Grounding check and scoring
     clue_texts = get_clue_texts(sample)
-    grounding = check_grounding(evidence_lines, clue_texts)
+    grounding = check_grounding(evidence, clue_texts)
     result["step5_grounding"] = grounding
-
-    if grounding["n_matched"] == 0:
-        # Said correct secret but no valid evidence
-        result["score"] = 2
-    elif grounding["all_found"]:
-        # Found ALL clues with no wrong citations
-        result["score"] = 5
-    elif grounding["all_correct"]:
-        # Some clues found, but no wrong citations (precise but incomplete)
-        result["score"] = 4
-    else:
-        # Some clues found, but also cited noise (noisy evidence)
-        result["score"] = 3
-
+    result["score"] = compute_score(detected, verified, grounding)
     return result
 
 
-def evaluate_dataset(
-    tester_engine, judge_engine,
-    dataset_path: str, output_path: str,
-):
-    """Evaluate all samples in a dataset."""
+def evaluate_dataset(tester_engine, judge_engine, dataset_path: str, output_path: str):
     samples = [BenchmarkSample(**json.loads(l)) for l in open(dataset_path)]
+    prompts = {
+        "DETECTION_PROMPT": DETECTION_PROMPT,
+        "IDENTIFICATION_PROMPT": IDENTIFICATION_PROMPT,
+        "JUDGE_PROMPT": JUDGE_PROMPT,
+        "GROUNDING_PROMPT": GROUNDING_PROMPT,
+    }
     results = []
-
     for i, sample in enumerate(samples):
-        print(f"  Evaluating [{i+1}/{len(samples)}] secret={sample.secret_topic} SNR={sample.snr}")
-        result = evaluate_sample(tester_engine, judge_engine, sample)
+        print(f"  [{i+1}/{len(samples)}] secret={sample.secret_topic} SNR={sample.snr}")
+        result = evaluate_sample(sample, tester_engine, prompts, judge_engine)
         results.append(result)
-        print(f"    Score: {result['score']}/3")
+        print(f"    Score: {result['score']}/5")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    # Print summary
     scores = [r["score"] for r in results]
     print(f"\n=== Evaluation Summary ===")
     print(f"Samples: {len(results)}")
@@ -193,5 +176,5 @@ def evaluate_dataset(
     print(f"  3 (correct ID, noisy cites):   {scores.count(3)}")
     print(f"  4 (correct ID, partial cites): {scores.count(4)}")
     print(f"  5 (fully correct):             {scores.count(5)}")
-
+    print(f"\nResults saved to {output_path}")
     return results
