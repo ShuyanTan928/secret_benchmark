@@ -1,8 +1,0 @@
-benchmark:
-  n_samples: 200
-  noise_rounds_range: [5, 15]
-  emails_per_dialogue: 4
-
-output:
-  dataset_dir: "outputs/datasets"
-  results_dir: "outputs/results"

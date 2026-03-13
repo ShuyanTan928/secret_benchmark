@@ -1,7 +1,7 @@
 import random, uuid
 from src.data_utils.schema import BenchmarkSample, EmailDialogue, EmailTurn
 from src.data_utils.person_sampler import sample_pair
-from src.generation.prompts import PLACEHOLDER_A, PLACEHOLDER_B
+from src.prompts import PLACEHOLDER_A, PLACEHOLDER_B
 
 
 def _replace_names(dialogue: EmailDialogue, person_a: str, person_b: str) -> EmailDialogue:

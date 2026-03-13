@@ -1,5 +1,5 @@
 import uuid
-from src.generation.prompts import NOISE_DIALOGUE_PROMPT, PERSONA_PROMPT
+from src.prompts import NOISE_DIALOGUE_PROMPT, PERSONA_PROMPT
 from src.generation.dialogue_generator import _parse_emails_json
 from src.data_utils.schema import EmailDialogue
 

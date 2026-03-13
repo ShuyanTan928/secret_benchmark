@@ -1,5 +1,5 @@
 import uuid, json, re
-from src.generation.prompts import SECRET_DIALOGUE_PROMPT, PERSONA_PROMPT, PLACEHOLDER_A, PLACEHOLDER_B
+from src.prompts import SECRET_DIALOGUE_PROMPT, PERSONA_PROMPT, PLACEHOLDER_A, PLACEHOLDER_B
 from src.data_utils.schema import EmailDialogue, EmailTurn
 
 
@@ -55,9 +55,6 @@ def generate_secret_dialogue(engine, clue: str) -> EmailDialogue:
     if len(emails) == 0:
         raw = engine.generate(prompt, max_tokens=512, temperature=0.85)[0]
         emails = _parse_emails_json(raw)
-
-    # Only keep first 2 emails to enforce one round of back-and-forth
-    emails = emails[:2]
 
     # Only keep first 2 emails
     emails = emails[:2]

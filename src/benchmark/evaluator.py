@@ -1,17 +1,23 @@
 """
-Multi-step evaluation logic and scoring for the email benchmark.
+Multi-step evaluation logic, scoring, and metrics for the email benchmark.
 """
 
-import json, re
-from pathlib import Path
+import json
+import pandas as pd
 from difflib import SequenceMatcher
+from pathlib import Path
+
 from src.data_utils.schema import BenchmarkSample
 from src.benchmark.extract_utils import extract_yes_no, extract_text_answer, parse_evidence
-from src.benchmark.eval_prompts import (
+from src.prompts import (
     DETECTION_PROMPT, IDENTIFICATION_PROMPT,
     JUDGE_PROMPT, GROUNDING_PROMPT,
 )
 
+
+# ---------------------------------------------------------------------------
+# Thread formatting
+# ---------------------------------------------------------------------------
 
 def format_thread(sample: BenchmarkSample) -> str:
     parts = []
@@ -28,13 +34,16 @@ def format_thread(sample: BenchmarkSample) -> str:
 
 
 def get_clue_texts(sample: BenchmarkSample) -> list[str]:
-    clue_texts = []
-    for d in sample.dialogues:
-        if d.is_secret_clue:
-            combined = " ".join(e.body for e in d.emails)
-            clue_texts.append(combined)
-    return clue_texts
+    return [
+        " ".join(e.body for e in d.emails)
+        for d in sample.dialogues
+        if d.is_secret_clue
+    ]
 
+
+# ---------------------------------------------------------------------------
+# Grounding / fuzzy matching
+# ---------------------------------------------------------------------------
 
 def _fuzzy_match(evidence_line: str, clue_text: str, threshold: float = 0.4) -> bool:
     ev_lower = evidence_line.lower().strip()
@@ -47,8 +56,7 @@ def _fuzzy_match(evidence_line: str, clue_text: str, threshold: float = 0.4) -> 
         longest = max(b.size for b in blocks)
         if longest >= len(ev_lower) * 0.5 and longest >= 15:
             return True
-    ratio = SequenceMatcher(None, ev_lower, clue_lower).ratio()
-    return ratio >= threshold
+    return SequenceMatcher(None, ev_lower, clue_lower).ratio() >= threshold
 
 
 def check_grounding(evidence: list[str], clue_texts: list[str]) -> dict:
@@ -70,19 +78,21 @@ def check_grounding(evidence: list[str], clue_texts: list[str]) -> dict:
                 break
         if not found:
             unmatched.append(ei)
-    n_matched = len(matched)
-    n_total = len(evidence)
-    n_clues = len(clue_texts)
-    precision = n_matched / n_total if n_total > 0 else 0.0
-    recall = len(clues_hit) / n_clues if n_clues > 0 else 0.0
+
+    n_matched, n_total, n_clues = len(matched), len(evidence), len(clue_texts)
     return {
         "matched": matched, "unmatched": unmatched,
         "n_matched": n_matched, "n_unmatched": len(unmatched), "n_clues": n_clues,
-        "precision": round(precision, 4), "recall": round(recall, 4),
+        "precision": round(n_matched / n_total, 4) if n_total > 0 else 0.0,
+        "recall": round(len(clues_hit) / n_clues, 4) if n_clues > 0 else 0.0,
         "all_correct": n_matched == n_total and n_total > 0,
         "all_found": len(clues_hit) == n_clues,
     }
 
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
 
 def compute_score(detected: bool, verified: bool, grounding: dict) -> int:
     if not detected:
@@ -98,15 +108,24 @@ def compute_score(detected: bool, verified: bool, grounding: dict) -> int:
     return 3
 
 
-def evaluate_sample(sample, engine, prompts, judge_engine=None):
+# ---------------------------------------------------------------------------
+# Single-sample evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_sample(sample: BenchmarkSample, engine, judge_engine=None) -> dict:
     if judge_engine is None:
         judge_engine = engine
+
     thread = format_thread(sample)
     result = {"sample_id": sample.sample_id}
 
-    det_raw = engine.generate(prompts["DETECTION_PROMPT"].format(
-        person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
-    ), max_tokens=2048, temperature=0.0)[0]
+    # Step 1: Detection
+    det_raw = engine.generate(
+        DETECTION_PROMPT.format(
+            person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
+        ),
+        max_tokens=2048, temperature=0.0,
+    )[0]
     detected = extract_yes_no(det_raw)
     result["step1_raw"] = det_raw
     result["step1_detected"] = detected
@@ -114,16 +133,24 @@ def evaluate_sample(sample, engine, prompts, judge_engine=None):
         result["score"] = 0
         return result
 
-    id_raw = engine.generate(prompts["IDENTIFICATION_PROMPT"].format(
-        person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
-    ), max_tokens=2048, temperature=0.0)[0]
+    # Step 2: Identification
+    id_raw = engine.generate(
+        IDENTIFICATION_PROMPT.format(
+            person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
+        ),
+        max_tokens=2048, temperature=0.0,
+    )[0]
     id_answer = extract_text_answer(id_raw)
     result["step2_raw"] = id_raw
     result["step2_answer"] = id_answer
 
-    judge_raw = judge_engine.generate(prompts["JUDGE_PROMPT"].format(
-        ground_truth=sample.secret_answer, model_answer=id_answer,
-    ), max_tokens=2048, temperature=0.0)[0]
+    # Step 3: Judge verification
+    judge_raw = judge_engine.generate(
+        JUDGE_PROMPT.format(
+            ground_truth=sample.secret_answer, model_answer=id_answer,
+        ),
+        max_tokens=2048, temperature=0.0,
+    )[0]
     verified = extract_yes_no(judge_raw)
     result["step3_raw"] = judge_raw
     result["step3_verified"] = verified
@@ -131,14 +158,19 @@ def evaluate_sample(sample, engine, prompts, judge_engine=None):
         result["score"] = 1
         return result
 
-    ground_raw = engine.generate(prompts["GROUNDING_PROMPT"].format(
-        person_a=sample.person_a, person_b=sample.person_b,
-        email_thread=thread, model_answer=id_answer,
-    ), max_tokens=2048, temperature=0.0)[0]
+    # Step 4: Grounding
+    ground_raw = engine.generate(
+        GROUNDING_PROMPT.format(
+            person_a=sample.person_a, person_b=sample.person_b,
+            email_thread=thread, model_answer=id_answer,
+        ),
+        max_tokens=2048, temperature=0.0,
+    )[0]
     evidence = parse_evidence(ground_raw)
     result["step4_raw"] = ground_raw
     result["step4_evidence"] = evidence
 
+    # Step 5: Score grounding
     clue_texts = get_clue_texts(sample)
     grounding = check_grounding(evidence, clue_texts)
     result["step5_grounding"] = grounding
@@ -146,18 +178,15 @@ def evaluate_sample(sample, engine, prompts, judge_engine=None):
     return result
 
 
-def evaluate_dataset(tester_engine, judge_engine, dataset_path: str, output_path: str):
-    samples = [BenchmarkSample(**json.loads(l)) for l in open(dataset_path)]
-    prompts = {
-        "DETECTION_PROMPT": DETECTION_PROMPT,
-        "IDENTIFICATION_PROMPT": IDENTIFICATION_PROMPT,
-        "JUDGE_PROMPT": JUDGE_PROMPT,
-        "GROUNDING_PROMPT": GROUNDING_PROMPT,
-    }
+# ---------------------------------------------------------------------------
+# Dataset evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_dataset(tester_engine, judge_engine, samples: list[BenchmarkSample], output_path: str):
     results = []
     for i, sample in enumerate(samples):
         print(f"  [{i+1}/{len(samples)}] secret={sample.secret_topic} SNR={sample.snr}")
-        result = evaluate_sample(sample, tester_engine, prompts, judge_engine)
+        result = evaluate_sample(sample, tester_engine, judge_engine)
         results.append(result)
         print(f"    Score: {result['score']}/5")
 
@@ -165,16 +194,50 @@ def evaluate_dataset(tester_engine, judge_engine, dataset_path: str, output_path
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    scores = [r["score"] for r in results]
-    print(f"\n=== Evaluation Summary ===")
-    print(f"Samples: {len(results)}")
-    print(f"Average score: {sum(scores)/len(scores):.2f} / 5")
-    print(f"Score distribution:")
-    print(f"  0 (not detected):              {scores.count(0)}")
-    print(f"  1 (detected, wrong ID):        {scores.count(1)}")
-    print(f"  2 (correct ID, no valid cite): {scores.count(2)}")
-    print(f"  3 (correct ID, noisy cites):   {scores.count(3)}")
-    print(f"  4 (correct ID, partial cites): {scores.count(4)}")
-    print(f"  5 (fully correct):             {scores.count(5)}")
+    print_metrics(results)
     print(f"\nResults saved to {output_path}")
     return results
+
+
+# ---------------------------------------------------------------------------
+# Metrics (previously metrics.py)
+# ---------------------------------------------------------------------------
+
+def print_metrics(results: list[dict]):
+    """Print benchmark metrics from a list of result dicts."""
+    df = pd.DataFrame(results)
+    scores = df["score"]
+
+    print(f"\n=== Benchmark Metrics ===")
+    print(f"Total samples:  {len(df)}")
+    print(f"Average score:  {scores.mean():.2f} / 5")
+    print(f"Detection rate: {df['step1_detected'].mean():.2%}")
+
+    print(f"\nScore distribution:")
+    labels = [
+        (0, "not detected"),
+        (1, "detected, wrong ID"),
+        (2, "correct ID, no valid cite"),
+        (3, "correct ID, noisy cites"),
+        (4, "correct ID, partial cites"),
+        (5, "fully correct"),
+    ]
+    for v, label in labels:
+        print(f"  {v} ({label}): {(scores == v).sum()}")
+
+    if "secret_topic" in df.columns:
+        print(f"\nBy secret topic:")
+        for topic, score in df.groupby("secret_topic")["score"].mean().sort_values().items():
+            print(f"  {topic}: {score:.2f}")
+
+    if "snr" in df.columns:
+        print(f"\nBy SNR:")
+        df["snr_bin"] = pd.cut(df["snr"], bins=[0, 0.15, 0.3, 0.5, 1.0])
+        for snr_bin, score in df.groupby("snr_bin")["score"].mean().items():
+            print(f"  {snr_bin}: {score:.2f}")
+
+
+def compute_metrics(results_path: str):
+    """Load results from file and print metrics. Called from run_benchmark.py."""
+    results = json.load(open(results_path))
+    print_metrics(results)
