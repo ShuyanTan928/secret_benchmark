@@ -67,7 +67,7 @@ DETECTION_PROMPT = """Below is a series of email conversations between {person_a
 
 {email_thread}
 
-Question: Based on these emails, is there a hidden secret or something suspicious about the relationship between {person_a} and {person_b}?
+Question: Based on these emails, is there a hidden secret, inappropriate behavior, or something suspicious about the relationship between {person_a} and {person_b}?
 
 Rules:
 - Answer with EXACTLY one word: "Yes" or "No".
@@ -80,8 +80,8 @@ IDENTIFICATION_PROMPT = """Below is a series of email conversations between {per
 
 {email_thread}
 
-You previously determined there is a hidden secret in these emails.
-What is the secret? Describe it in 10 words or fewer.
+You previously determined there is a there a hidden secret, inappropriate behavior, or something suspicious in these emails.
+What is the secret, inappropriate behavior, or something suspicious? Describe it in 10 words or fewer.
 
 Rules:
 - Output ONLY the secret description, nothing else.
