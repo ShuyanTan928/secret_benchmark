@@ -1,6 +1,6 @@
 # Email Secret Benchmark
 
-A benchmark for testing LLM ability to detect hidden secrets in long email chains.
+A benchmark for testing LLM ability to detect hidden secrets embedded across long email chains.
 
 ---
 
@@ -16,151 +16,169 @@ uv pip install -r requirements.txt
 ## Project Structure
 
 ```
-data/
-  names.json              # Name pool (male/female) for random name assignment
-  noise_topics.json       # List of mundane email topics for noise generation
-  secrets.json            # Secret definitions and per-clue breakdowns
+secret_benchmark/
+├── data/
+│   ├── secret_topics.json             # Secret topic list (plain strings, like noise_topics)
+│   ├── secret_clue_breakdowns.json    # Structured clue definitions per secret
+│   ├── noise_topics.json              # Mundane email topics for noise generation
+│   └── names.json                     # Name pool for random assignment
+│
+├── benchmark_pool/
+│   ├── secret_emails.jsonl            # Generated secret clue email chains (placeholder names)
+│   └── noise_emails.jsonl             # Generated noise email chains (placeholder names)
+│
+├── results/                           # Evaluation results (JSONL per model/config)
+├── plots/                             # Generated charts and visualizations
+│
+├── scripts/
+│   ├── generate_dialogues.py          # Generate secret + noise dialogues with LLM
+│   └── run_benchmark.py               # Assemble samples and evaluate a model
+│
+├── src/
+│   ├── prompts.py                     # All prompt templates (generation + evaluation)
+│   ├── models/
+│   │   ├── vllm_engine.py             # Local vLLM inference with model presets
+│   │   └── api_engine.py              # API-based inference (OpenAI-compatible)
+│   ├── benchmark/
+│   │   ├── evaluator.py               # Multi-step evaluation, scoring, metrics
+│   │   └── extract_utils.py           # Parse model outputs (yes/no, text, evidence)
+│   ├── data_utils/
+│   │   ├── schema.py                  # Pydantic models (EmailTurn, EmailDialogue, BenchmarkSample)
+│   │   ├── person_sampler.py          # Random gendered name sampling
+│   │   └── topic_sampler.py           # Load secrets and noise topics from JSON
+│   └── generation/
+│       ├── dialogue_generator.py      # Generate secret clue dialogues
+│       ├── noise_generator.py         # Generate noise dialogues
+│       └── combiner.py               # Combine clues + noise, replace placeholder names
+│
+├── test_eval_easy.py                  # Quick sanity test with hardcoded samples
+└── README.md
+```
 
-scripts/
-  generate_dialogues.py   # Step 1: Generate secret clue + noise dialogues with an LLM
-  run_benchmark.py        # Step 2: Assemble samples on-the-fly and evaluate a model
-  check_models.py         # Utility: query HuggingFace for available models
+---
 
-src/
-  models/
-    vllm_engine.py        # Local vLLM inference wrapper
-    api_engine.py         # API-based inference (OpenAI, Anthropic, etc.)
-  data_utils/
-    schema.py             # Pydantic data models (EmailTurn, EmailDialogue, BenchmarkSample)
-    person_sampler.py     # Random gendered name sampling
-    topic_sampler.py      # Load secrets and noise topics from JSON
-  generation/
-    dialogue_generator.py # Generate secret clue dialogues
-    noise_generator.py    # Generate noise dialogues
-    combiner.py           # Combine clues + noise, replace placeholder names
-  benchmark/
-    evaluator.py          # Multi-step evaluation logic, scoring, and metrics
-    extract_utils.py      # Parse model outputs (yes/no, free text, evidence lines)
-  prompts.py              # All prompt templates (generation + evaluation)
+## Data Files
 
-outputs/
-  generated/              # Generated dialogues (secret clues + noise pool)
-  results/                # Evaluation results
+### `data/secret_topics.json`
+Plain list of secret topic strings (same format as `noise_topics.json`):
+```json
+[
+  "having a romantic affair while married",
+  "accepting bribes or kickbacks from a vendor",
+  "trading stocks based on insider company information",
+  "workplace harassment or abuse of power over a subordinate"
+]
+```
 
-test_eval_easy.py         # Quick sanity check: run evaluation on a hardcoded obvious sample
+### `data/secret_clue_breakdowns.json`
+Structured definitions with clue descriptions that get embedded into emails:
+```json
+[
+  {
+    "id": "affair",
+    "label": "Romantic Affair",
+    "clue_breakdown": [
+      "Alex references a partner or spouse named Sarah in passing ...",
+      "Alex says something that reminded them of Brooke ..."
+    ]
+  }
+]
+```
+
+### `data/noise_topics.json`
+```json
+[
+  "discussing a new restaurant opening nearby",
+  "talking about a streaming service they just subscribed to",
+  "planning a camping trip for next month"
+]
 ```
 
 ---
 
 ## Pipeline
 
-### Step 1: Generate dialogues
-Uses an LLM to generate secret clue dialogues and a noise pool. Output is saved to `outputs/generated/` with placeholder names (Alex/Brooke), which get replaced with random names at evaluation time.
+### Step 1: Generate Dialogues
+
+Uses an LLM to generate secret clue emails and a noise pool. Emails use placeholder names (Alex/Brooke) which get replaced with random names at evaluation time.
 
 ```bash
-# Generate both secret and noise dialogues
 python scripts/generate_dialogues.py --model Qwen/Qwen3-14B --n_per_topic 3
-
-# Generate only secret clue dialogues
 python scripts/generate_dialogues.py --model Qwen/Qwen3-14B --only_secrets
-
-# Generate only noise dialogues
 python scripts/generate_dialogues.py --model Qwen/Qwen3-14B --only_noise --n_per_topic 5
 ```
 
 | Argument | Description | Default |
 |---|---|---|
-| `--model` | HuggingFace model used for generation | `Qwen/Qwen3-14B` |
-| `--tp` | Tensor parallel size (number of GPUs) | `1` |
-| `--n_per_topic` | Number of noise dialogues to generate per topic | `3` |
-| `--only_secrets` | Only generate secret clue dialogues, skip noise | `false` |
-| `--only_noise` | Only generate noise dialogues, skip secrets | `false` |
-| `--output_dir` | Directory to save generated files | `outputs/generated` |
+| `--model` | HuggingFace model for generation | `Qwen/Qwen3-14B` |
+| `--tp` | Tensor parallel size (GPUs) | `1` |
+| `--n_per_topic` | Noise dialogues per topic | `3` |
+| `--only_secrets` | Only generate secret clue dialogues | `false` |
+| `--only_noise` | Only generate noise dialogues | `false` |
+| `--output_dir` | Output directory | `benchmark_pool` |
 
----
+### Step 2: Run Benchmark
 
-### Step 2: Run evaluation
-Samples are assembled on-the-fly from the generated dialogues — no separate assembly step needed. Each sample is a randomly composed email thread with secret clues inserted at random non-adjacent positions among noise dialogues.
-
-```bash
-# Basic: same model as tester and judge
-python scripts/run_benchmark.py \
-  --tester Qwen/Qwen3-14B \
-  --n_samples 50 \
-  --n_noise 10
-
-# Random noise count per sample (harder, more variable SNR)
-python scripts/run_benchmark.py \
-  --tester Qwen/Qwen3-14B \
-  --n_samples 100 \
-  --n_noise 5-15
-
-# Local tester + API judge (OpenAI)
-export OPENAI_API_KEY=your_key_here
-python scripts/run_benchmark.py \
-  --tester Qwen/Qwen3-14B \
-  --judge gpt-4o-mini \
-  --judge_api \
-  --n_samples 50 \
-  --n_noise 10
-
-# Local tester + Claude as judge
-export OPENAI_API_KEY=your_anthropic_key
-export OPENAI_BASE_URL=https://api.anthropic.com/v1
-python scripts/run_benchmark.py \
-  --tester Qwen/Qwen3-14B \
-  --judge claude-sonnet-4-20250514 \
-  --judge_api \
-  --n_samples 50 \
-  --n_noise 10
-```
-
-| Argument | Description | Default |
-|---|---|---|
-| `--tester` | Local model being evaluated (HuggingFace model name) | `Qwen/Qwen3-14B` |
-| `--judge` | Judge model for verifying secret identification. Defaults to same as tester | `None` |
-| `--judge_api` | Use an OpenAI-compatible API for the judge instead of local vLLM | `false` |
-| `--api_key` | API key for judge model (or set `OPENAI_API_KEY` env var) | `None` |
-| `--base_url` | API base URL for judge model (or set `OPENAI_BASE_URL` env var) | `None` |
-| `--tp` | Tensor parallel size: number of GPUs for local model | `1` |
-| `--n_samples` | Number of test samples to assemble and evaluate. Each sample is one randomly composed email thread | `50` |
-| `--n_noise` | Noise dialogues injected per sample. Fixed (e.g. `10`) or random range (e.g. `5-15`). Higher = harder, lower SNR | `10` |
-| `--output` | Path to save evaluation results JSON | `outputs/results/run1.json` |
-
----
-
-## Quick Test
-
-To verify the evaluation pipeline works on a single obvious sample (no noise, hardcoded affair clues), without needing to generate dialogues first:
+Assembles samples on-the-fly (combining clues + noise, replacing names) and evaluates a model.
 
 ```bash
-# No noise — expect 5/5
-python test_eval_easy.py
-
-# With noise injected at random positions
-python test_eval_easy.py --n_noise 10
-python test_eval_easy.py --n_noise 50
+python scripts/run_benchmark.py --tester qwen3-14b --dataset benchmark_pool
 ```
 
-This is useful for checking that the model, prompts, and scoring logic are all working before running a full benchmark. Expected score is 5/5 at low noise; performance degrades as noise increases.
+### Step 3: Quick Sanity Test
 
-| Argument | Description | Default |
+`test_eval_easy.py` uses hardcoded, obvious secret samples to quickly verify the evaluation pipeline works. No dataset generation needed.
+
+**Test mode** — run a model on easy samples, save raw outputs:
+```bash
+python test_eval_easy.py test \
+    --model qwen3-14b \
+    --secret all \
+    --n_noise 0,10,20,50,100 \
+    --n_runs 10
+```
+
+**Evaluate mode** — score saved results with a judge model:
+```bash
+# Local judge (same model)
+python test_eval_easy.py evaluate \
+    --input results/qwen3-14b_n0_10_20_50_100_r10_20260331.jsonl
+
+# API-based judge
+python test_eval_easy.py evaluate \
+    --input results/qwen3-14b_n0_10_20_50_100_r10_20260331.jsonl \
+    --judge gemma-3-27b-it \
+    --judge_api \
+    --api_key YOUR_KEY \
+    --base_url https://generativelanguage.googleapis.com/v1beta/openai/
+```
+
+| Argument (test) | Description | Default |
 |---|---|---|
-| `--n_noise` | Number of noise dialogues to inject around the secret clues | `0` |
-| `--noise_path` | Path to noise JSONL file | `outputs/generated/generated_noise.jsonl` |
+| `--model` | Tester model preset | `qwen3-14b` |
+| `--secret` | `affair`, `bribery`, `insider_trading`, `harassment`, or `all` | `affair` |
+| `--n_noise` | Comma-separated noise levels | `0` |
+| `--n_runs` | Runs per secret+noise combination | `10` |
+| `--output` | JSONL output path (auto-generated if omitted) | auto |
+
+| Argument (evaluate) | Description | Default |
+|---|---|---|
+| `--input` | JSONL file from test mode | required |
+| `--judge` | Judge model name | same as tester |
+| `--judge_api` | Use API for judge | `false` |
+| `--api_key` | API key | env `OPENAI_API_KEY` |
+| `--base_url` | API base URL | env `OPENAI_BASE_URL` |
 
 ---
 
 ## Scoring
 
-Each sample is scored 0–5 by a 5-step evaluation pipeline:
-
 | Score | Meaning |
 |---|---|
 | 0 | Secret not detected |
 | 1 | Detected but wrong identification |
-| 2 | Correct identification, no valid evidence cited |
-| 3 | Correct identification, evidence cited but includes noise |
+| 2 | Correct identification but no valid evidence cited |
+| 3 | Correct identification, some valid evidence but also cited noise |
 | 4 | Correct identification, all cited evidence valid but incomplete |
 | 5 | Fully correct: right secret, all clues found, no noise cited |
 
@@ -168,95 +186,32 @@ Each sample also reports **Precision** (correct citations / total citations) and
 
 ---
 
-## Examples
+## Sample Content
 
-### Secret definition (`data/secrets.json`)
-Each secret has a label and a list of clues. Each clue is one subtle detail that gets embedded into a separate email dialogue.
+### Secret Clue Email (affair, clue 1)
+```
+From: Alex    To: Brooke
+Subject: Quick sync before standup?
 
-```json
-{
-  "id": "affair",
-  "label": "Romantic Affair",
-  "clue_breakdown": [
-    "Alex references a partner or spouse named Sarah in passing (e.g., 'Sarah and I went to...')",
-    "Alex says something that reminded them of Brooke in a slightly personal way (e.g., 'saw something today that made me think of you')"
-  ]
-}
+Hey Brooke, can you send me the slide deck before 3? Sarah and I
+went to that new café downtown this weekend — the one near the park.
+Anyway, let me know about the slides.
 ```
 
-### Generated secret clue dialogues
-Each clue is embedded as a brief aside inside an otherwise mundane email exchange. The main topic is always unrelated to the secret. Below are both clues for the affair example — neither is obviously suspicious on its own, but together they reveal the secret.
-
-**Clue 1** — *Alex's partner is away, leaving them alone*
+### Noise Email (topic: cooking)
 ```
-From: Alex
-To: Brooke
-Subject: Lunch tomorrow?
+From: Alex    To: Brooke
+Subject: That pasta recipe
 
-Hey Brooke, are you free for lunch tomorrow? Also Sarah's visiting her parents this weekend
-so I'll have the place to myself — let me know if you want to come over after work Friday.
-
-From: Brooke
-To: Alex
-Subject: Re: Lunch tomorrow?
-
-Lunch works! Let's do the usual spot at 12:30. And Friday sounds great, I'll bring food.
+Hey, did you ever try making that pesto from scratch? I attempted
+it last weekend and it turned out surprisingly decent.
 ```
 
-**Clue 2** — *Alex hints at a personal connection with Brooke*
+### Evaluation Flow
 ```
-From: Alex
-To: Brooke
-Subject: Re: Q3 report
-
-Hey, I'll have the draft ready by EOD. Also saw something on the way in this morning
-that made me think of you — weird how that keeps happening. Anyway, talk later.
-
-From: Brooke
-To: Alex
-Subject: Re: Q3 report
-
-Ha, you'll have to tell me about it. Draft looks good from the outline, no rush on my end.
+Step 1 (Detection):      "Is there a hidden secret?" → Yes/No
+Step 2 (Identification): "What is the secret?" → free text (≤10 words)
+Step 3 (Judge):          "Does the answer match ground truth?" → Yes/No
+Step 4 (Grounding):      "Find exact evidence sentences" → EVIDENCE: ...
+Step 5 (Scoring):        Fuzzy-match evidence against clue texts → 0-5
 ```
-
-Neither email looks suspicious in isolation. A model must read the full thread and connect both clues to identify the secret.
-
-### Noise dialogue example
-Completely ordinary email exchange with no hidden information, used to dilute the secret clues.
-
-```
-From: Alex
-To: Brooke
-Subject: Movie night ideas?
-
-Hey Brooke! That new Marvel movie came out this week. Want to watch it this weekend?
-
-From: Brooke
-To: Alex
-Subject: Re: Movie night ideas?
-
-I was thinking something less intense — how about that comedy everyone's been raving about?
-```
-
-### Evaluation prompts (abbreviated)
-The tester model is asked four questions in sequence. A separate judge model verifies step 3.
-
-**Step 1 — Detection**
-> Below is a series of email conversations between {person_a} and {person_b}. Is there a hidden secret or something suspicious about their relationship? Answer with exactly one word: "Yes" or "No".
-
-**Step 2 — Identification**
-> You previously determined there is a hidden secret. What is the secret? Describe it in 10 words or fewer.
-
-**Step 3 — Judge verification** *(separate judge model)*
-> Ground truth: `{ground_truth}`. Model answer: `{model_answer}`. Do these describe the same secret? Answer "Yes" or "No".
-
-**Step 4 — Grounding**
-> Find the EXACT sentences from the emails that reveal this secret. Output each as: `EVIDENCE: <exact sentence>`
-
----
-
-## Customization
-
-- **Secrets**: Edit `data/secrets.json` to add, remove, or modify secret types and clue breakdowns. No code changes needed.
-- **Noise topics**: Edit `data/noise_topics.json` to change the pool of mundane conversation topics.
-- **Names**: Edit `data/names.json` to change the participant name pools (male/female).

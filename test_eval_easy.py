@@ -1,13 +1,18 @@
 """
-Easy test: hardcoded obvious secret clues, no LLM generation needed.
-Supports multiple secrets, multiple runs per config, and noise injection.
+Easy test with hardcoded obvious secret clues.
+Two modes:
+  test     - Run model on all samples, save raw outputs to JSONL
+  evaluate - Read JSONL, compute scores, print table
 
 Usage:
-  python test_eval_easy.py                             # affair, no noise, 1 run
-  python test_eval_easy.py --n_noise 10                # affair, 10 noise, 1 run
-  python test_eval_easy.py --n_noise 10 --n_runs 5     # affair, 10 noise, avg over 5 runs
-  python test_eval_easy.py --secret all --n_noise 10   # all secrets, 10 noise, 1 run
-  python test_eval_easy.py --secret bribery --n_runs 3 # bribery only, 3 runs
+  # Test mode: run model, save raw outputs
+  python test_eval_easy.py test --model qwen3-32b --secret all --n_noise 0,10 --n_runs 10 --output results/qwen3_32b.jsonl
+
+  # Test with separate judge
+  python test_eval_easy.py test --model qwen3-14b --judge gemma-3-27b-it --judge_api --api_key KEY --base_url URL ...
+
+  # Evaluate mode: read JSONL, compute scores
+  python test_eval_easy.py evaluate --input results/qwen3_32b.jsonl
 """
 
 import argparse
@@ -15,15 +20,18 @@ import json
 import random
 
 from src.models.vllm_engine import VLLMEngine, MODEL_CONFIGS
+from src.models.api_engine import APIEngine
 from src.benchmark.evaluator import (
-    format_thread, get_clue_texts, check_grounding, compute_score,
+    format_thread, get_clue_texts, get_clue_bodies_for_judge,
+    check_grounding, compute_score, run_sample, score_record,
+    evaluate_record, append_record, load_records, print_metrics,
 )
 from src.benchmark.extract_utils import extract_yes_no, extract_text_answer, parse_evidence
 from src.prompts import DETECTION_PROMPT, IDENTIFICATION_PROMPT, JUDGE_PROMPT, GROUNDING_PROMPT
 from src.data_utils.schema import BenchmarkSample, EmailDialogue, EmailTurn
 
 
-NOISE_PATH = "outputs/generated/generated_noise.jsonl"
+NOISE_PATH = "benchmark_pool/noise_emails.jsonl"
 
 # ---------------------------------------------------------------------------
 # Hardcoded easy samples for each secret type
@@ -38,29 +46,7 @@ EASY_SECRETS = {
                 topic="[SECRET_CLUE]",
                 is_secret_clue=True,
                 clue_index=1,
-                clue_description="mentions spouse",
-                emails=[
-                    EmailTurn(
-                        sender="Justin", recipient="Tina",
-                        subject="Dinner tonight?",
-                        body="Hey Tina, Sarah is visiting her parents this weekend "
-                             "so I have the place to myself. Want to come over for "
-                             "dinner tonight? I'll cook that pasta you love.",
-                    ),
-                    EmailTurn(
-                        sender="Tina", recipient="Justin",
-                        subject="Re: Dinner tonight?",
-                        body="Yes! I'd love that. I'll bring the wine. Should I "
-                             "come around 7? Can't wait to see you.",
-                    ),
-                ],
-            ),
-            EmailDialogue(
-                dialogue_id="affair_clue2",
-                topic="[SECRET_CLUE]",
-                is_secret_clue=True,
-                clue_index=2,
-                clue_description="romantic hint",
+                clue_description="secret romantic relationship at work",
                 emails=[
                     EmailTurn(
                         sender="Justin", recipient="Tina",
@@ -74,6 +60,30 @@ EASY_SECRETS = {
                         subject="Re: Last night",
                         body="I know, me too. Don't worry, I'll act normal at the "
                              "office. But I miss you already. See you at the meeting later?",
+                    ),
+                ],
+            ),
+            EmailDialogue(
+                dialogue_id="affair_clue2",
+                topic="[SECRET_CLUE]",
+                is_secret_clue=True,
+                clue_index=2,
+                clue_description="hiding affair from spouse",
+                emails=[
+                    EmailTurn(
+                        sender="Justin", recipient="Tina",
+                        subject="This weekend",
+                        body="Sarah thinks I'm going on a work trip this weekend, "
+                             "so we have two whole days together. I booked the same "
+                             "hotel as last time. I hate lying to her but I can't stop "
+                             "seeing you.",
+                    ),
+                    EmailTurn(
+                        sender="Tina", recipient="Justin",
+                        subject="Re: This weekend",
+                        body="I feel guilty about Sarah too, but I can't help it. "
+                             "I'll tell my roommate I'm visiting family. "
+                             "Our secret is safe. See you Friday night.",
                     ),
                 ],
             ),
@@ -306,169 +316,301 @@ def make_easy_sample(secret_id: str, n_noise: int = 0) -> BenchmarkSample:
     )
 
 
-# ---------------------------------------------------------------------------
-# Single run
-# ---------------------------------------------------------------------------
+# ===================================================================
+# MODE 1: TEST — run model, save raw outputs to JSONL
+# ===================================================================
 
-def run_once(engine, secret_id: str, n_noise: int) -> dict:
-    sample = make_easy_sample(secret_id=secret_id, n_noise=n_noise)
-    thread = format_thread(sample)
-    result = {"secret_id": secret_id, "n_noise": n_noise, "snr": sample.snr}
+def cmd_test(args):
+    # Set up tester engine
+    if args.model_api:
+        engine = APIEngine(
+            model_name=args.model_api,
+            api_key=args.api_key,
+            base_url=args.base_url,
+        )
+        model_tag = args.model_api.replace("/", "_")
+        print(f"Tester: {args.model_api} (API)")
+    elif args.model:
+        engine = VLLMEngine.from_preset(args.model, enable_thinking=False)
+        model_tag = args.model
+        print(f"Tester: {args.model} (local)")
+    else:
+        raise ValueError("Must specify --model (vLLM) or --model_api (API)")
 
-    # ---- Step 1: Detection ----
-    det_prompt = DETECTION_PROMPT.format(
-        person_a=sample.person_a, person_b=sample.person_b, email_thread=thread
-    )
-    det_raw = engine.generate(det_prompt, max_tokens=2048, temperature=0.0)[0]
-    detected = extract_yes_no(det_raw)
-    result["step1_raw"] = det_raw
-    result["step1_detected"] = detected
+    # Parse args
+    if args.secret == "all":
+        secret_ids = list(EASY_SECRETS.keys())
+    else:
+        secret_ids = [args.secret]
+    noise_levels = [int(x.strip()) for x in args.n_noise.split(",")]
+    n_runs = args.n_runs
 
-    # print("\n" + "-" * 40)
-    # print("[Step 1 - Detection] Prompt:")
-    # print(det_prompt[:500] + "..." if len(det_prompt) > 500 else det_prompt)
-    # print(f"\n[Step 1 - Detection] Raw output:\n{det_raw}")
-    # print(f"[Step 1 - Detection] Detected: {detected}")
+    # Auto-generate output path if not specified
+    if args.output:
+        output_path = args.output
+    else:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        noise_tag = "_".join(str(n) for n in noise_levels)
+        output_path = f"results/{model_tag}_n{noise_tag}_r{n_runs}_{timestamp}.jsonl"
 
-    if not detected:
-        result["score"] = 0
-        return result
+    print(f"Secrets: {secret_ids}")
+    print(f"Noise levels: {noise_levels}")
+    print(f"Runs per cell: {n_runs}")
+    print(f"Output: {output_path}")
+    print()
 
-    # ---- Step 2: Identification ----
-    id_prompt = IDENTIFICATION_PROMPT.format(
-        person_a=sample.person_a, person_b=sample.person_b, email_thread=thread
-    )
-    id_raw = engine.generate(id_prompt, max_tokens=2048, temperature=0.0)[0]
-    id_answer = extract_text_answer(id_raw)
-    result["step2_raw"] = id_raw
-    result["step2_answer"] = id_answer
-
-    # print("\n" + "-" * 40)
-    # print("[Step 2 - Identification] Prompt:")
-    # print(id_prompt[:500] + "..." if len(id_prompt) > 500 else id_prompt)
-    # print(f"\n[Step 2 - Identification] Raw output:\n{id_raw}")
-    # print(f"[Step 2 - Identification] Extracted answer: {id_answer}")
-
-    # ---- Step 3: Judge (verification) ----
-    judge_prompt = JUDGE_PROMPT.format(
-        ground_truth=sample.secret_answer, model_answer=id_answer
-    )
-    judge_raw = engine.generate(judge_prompt, max_tokens=2048, temperature=0.0)[0]
-    verified = extract_yes_no(judge_raw)
-    result["step3_raw"] = judge_raw
-    result["step3_verified"] = verified
-
-    # print("\n" + "-" * 40)
-    # print(f"[Step 3 - Judge] Ground truth: {sample.secret_answer}")
-    # print(f"[Step 3 - Judge] Model answer:  {id_answer}")
-    # print(f"[Step 3 - Judge] Prompt:\n{judge_prompt}")
-    # print(f"\n[Step 3 - Judge] Raw output:\n{judge_raw}")
-    # print(f"[Step 3 - Judge] Verified: {verified}")
-
-    if not verified:
-        result["score"] = 1
-        result["step3_debug"] = f"ground_truth='{sample.secret_answer}' | model_answer='{id_answer}' | judge_raw='{judge_raw}'"
-        return result
-
-    # ---- Step 4: Grounding ----
-    ground_prompt = GROUNDING_PROMPT.format(
-        person_a=sample.person_a, person_b=sample.person_b,
-        email_thread=thread, model_answer=id_answer,
-    )
-    ground_raw = engine.generate(ground_prompt, max_tokens=2048, temperature=0.0)[0]
-    evidence = parse_evidence(ground_raw)
-    clue_texts = get_clue_texts(sample)
-    grounding = check_grounding(evidence, clue_texts)
-    result["step4_raw"] = ground_raw
-    result["step5_grounding"] = grounding
-    result["score"] = compute_score(detected, verified, grounding)
-
-    # print("\n" + "-" * 40)
-    # print(f"[Step 4 - Grounding] Prompt:")
-    # print(ground_prompt[:500] + "..." if len(ground_prompt) > 500 else ground_prompt)
-    # print(f"\n[Step 4 - Grounding] Raw output:\n{ground_raw}")
-    # print(f"[Step 4 - Grounding] Parsed evidence: {evidence}")
-    # print(f"[Step 4 - Grounding] Clue texts: {clue_texts}")
-    # print(f"[Step 4 - Grounding] Grounding result: {grounding}")
-    # print(f"[Step 4 - Grounding] Final score: {result['score']}")
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Multi-run with averaging
-# ---------------------------------------------------------------------------
-
-def run_test(secret_ids: list[str], noise_levels: list[int], n_runs: int, model_preset: str):
-    engine = VLLMEngine.from_preset(model_preset, enable_thinking=False)
-
-    # all_results[secret_id][n_noise] = list of scores
-    all_results: dict[str, dict[int, list[int]]] = {}
+    total = len(secret_ids) * len(noise_levels) * n_runs
+    count = 0
 
     for secret_id in secret_ids:
-        all_results[secret_id] = {}
         for n_noise in noise_levels:
-            scores = []
-            for _ in range(n_runs):
-                result = run_once(engine, secret_id, n_noise)
-                scores.append(result["score"])
-            all_results[secret_id][n_noise] = scores
+            for run_i in range(n_runs):
+                count += 1
+                sample = make_easy_sample(secret_id=secret_id, n_noise=n_noise)
 
-    # --------------- Summary Table ---------------
+                print(f"[{count}/{total}] secret={secret_id} noise={n_noise} run={run_i+1}/{n_runs}")
+
+                record = run_sample(sample, engine)
+                record["run_index"] = run_i
+                record["model"] = args.model_api or args.model
+
+                # Save clue texts for later evaluation
+                record["clue_texts"] = get_clue_texts(sample)
+
+                # Print summary of each step
+                print(f"  Step 1 (Detection):      {record['step1_raw'][:80]}")
+                print(f"  Step 2 (Identification): {record['step2_raw'][:80]}")
+                print(f"  Step 4 (Grounding):      {record['step4_raw'][:80]}")
+
+                append_record(record, output_path)
+                print(f"  -> saved to {output_path}")
+
+    print(f"\nDone. {count} records saved to {output_path}")
+
+
+# ===================================================================
+# MODE 2: EVALUATE — read JSONL, compute scores, print table
+# ===================================================================
+
+def cmd_evaluate(args):
+    records = load_records(args.input)
+    print(f"Loaded {len(records)} records from {args.input}")
+
+    # Set up judge engine
+    judge_engine = None
+    if args.judge_api and args.judge:
+        judge_engine = APIEngine(
+            model_name=args.judge,
+            api_key=args.api_key,
+            base_url=args.base_url,
+        )
+        print(f"Judge: {args.judge} (API)")
+    elif args.judge:
+        judge_engine = VLLMEngine.from_preset(args.judge, enable_thinking=False)
+        print(f"Judge: {args.judge} (local)")
+    else:
+        print("No judge specified — skipping Step 3 verification (all verified=False)")
+
+    scored_records = []
+    for i, record in enumerate(records):
+        clue_texts = record.get("clue_texts", [])
+        scored = evaluate_record(record, clue_texts, judge_engine)
+        scored_records.append(scored)
+        if (i + 1) % 50 == 0 or i == len(records) - 1:
+            print(f"  Evaluated {i+1}/{len(records)}")
+
+    # Overwrite original JSONL with scored records
+    from pathlib import Path
+    Path(args.input).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.input, "w") as f:
+        for r in scored_records:
+            if "step5_grounding" in r:
+                g = r["step5_grounding"]
+                r["precision"] = g.get("precision")
+                r["recall"] = g.get("recall")
+                r["grounding_matched"] = g.get("n_matched")
+                r["grounding_unmatched"] = g.get("n_unmatched")
+                r["grounding_all_correct"] = g.get("all_correct")
+                r["grounding_all_found"] = g.get("all_found")
+                del r["step5_grounding"]
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    print(f"\nScores written back to {args.input}")
+    print()
+
+    # Print summary to terminal
+    print_summary_table(scored_records)
+    print_metrics(scored_records)
+
+    # Append summary table to the end of JSONL file as a comment block
+    summary = build_summary(scored_records)
+    with open(args.input, "a") as f:
+        f.write("\n# ===== EVALUATION SUMMARY =====\n")
+        f.write(f"# Judge: {args.judge or 'none'}\n")
+        for line in summary.split("\n"):
+            f.write(f"# {line}\n")
+    print(f"\nSummary table appended to {args.input}")
+
+
+def build_summary(scored_records: list[dict]) -> str:
+    """Build a text summary table from scored records."""
+    from collections import defaultdict
+    cells = defaultdict(list)
+    noise_levels = set()
+    secret_ids = []
+
+    for r in scored_records:
+        key = (r["secret_topic"], r["n_noise"])
+        cells[key].append(r["score"])
+        noise_levels.add(r["n_noise"])
+        if r["secret_topic"] not in secret_ids:
+            secret_ids.append(r["secret_topic"])
+
+    noise_levels = sorted(noise_levels)
+    noise_cols = "".join(f"{'n=' + str(n):>10}" for n in noise_levels)
+    header = f"{'Label':<30}{noise_cols}"
+
+    lines = []
+    lines.append("=" * len(header))
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    noise_totals = {n: [] for n in noise_levels}
+    for secret_id in secret_ids:
+        label = EASY_SECRETS.get(secret_id, {}).get("label", secret_id)
+        row = f"{label:<30}"
+        for n_noise in noise_levels:
+            scores = cells.get((secret_id, n_noise), [])
+            if scores:
+                avg = sum(scores) / len(scores)
+                noise_totals[n_noise].extend(scores)
+                row += f"{avg:>9.2f} "
+            else:
+                row += f"{'N/A':>10}"
+        lines.append(row)
+
+    lines.append("-" * len(header))
+    overall_row = f"{'Overall':<30}"
+    for n_noise in noise_levels:
+        scores = noise_totals[n_noise]
+        if scores:
+            avg = sum(scores) / len(scores)
+            overall_row += f"{avg:>9.2f} "
+        else:
+            overall_row += f"{'N/A':>10}"
+    lines.append(overall_row)
+    lines.append("=" * len(header))
+
+    n_runs = max(len(v) for v in cells.values()) if cells else 0
+    total = len(scored_records)
+    avg_all = sum(r["score"] for r in scored_records) / total if total else 0
+    lines.append(f"Runs per cell: {n_runs}  |  Total samples: {total}  |  Overall avg: {avg_all:.2f}/5")
+
+    return "\n".join(lines)
+
+
+def print_summary_table(scored_records: list[dict]):
+    """Print a noise × secret summary table."""
+    # Group by secret_topic and n_noise
+    from collections import defaultdict
+    cells = defaultdict(list)  # (secret_topic, n_noise) -> [scores]
+    noise_levels = set()
+    secret_ids = []
+
+    for r in scored_records:
+        key = (r["secret_topic"], r["n_noise"])
+        cells[key].append(r["score"])
+        noise_levels.add(r["n_noise"])
+        if r["secret_topic"] not in secret_ids:
+            secret_ids.append(r["secret_topic"])
+
+    noise_levels = sorted(noise_levels)
+
+    # Build table
     noise_cols = "".join(f"{'n=' + str(n):>10}" for n in noise_levels)
     header = f"{'Label':<30}{noise_cols}"
 
     print("\n" + "=" * len(header))
-    print(f"{'':30}" + "".join(f"{'Noise':>10}" if i == len(noise_levels) // 2 else f"{'':>10}" for i in range(len(noise_levels))))
     print(header)
     print("-" * len(header))
 
-    # Per-noise totals for overall row
-    noise_totals: dict[int, list[int]] = {n: [] for n in noise_levels}
+    noise_totals = {n: [] for n in noise_levels}
 
     for secret_id in secret_ids:
-        label = EASY_SECRETS[secret_id]["label"]
+        label = secret_id
+        # Try to get a nicer label
+        if secret_id in EASY_SECRETS:
+            label = EASY_SECRETS[secret_id]["label"]
         row = f"{label:<30}"
         for n_noise in noise_levels:
-            scores = all_results[secret_id][n_noise]
-            avg = sum(scores) / len(scores)
-            noise_totals[n_noise].extend(scores)
-            row += f"{avg:>9.2f} "
+            scores = cells.get((secret_id, n_noise), [])
+            if scores:
+                avg = sum(scores) / len(scores)
+                noise_totals[n_noise].extend(scores)
+                row += f"{avg:>9.2f} "
+            else:
+                row += f"{'N/A':>10}"
         print(row)
 
     print("-" * len(header))
     overall_row = f"{'Overall':<30}"
     for n_noise in noise_levels:
-        avg = sum(noise_totals[n_noise]) / len(noise_totals[n_noise])
-        overall_row += f"{avg:>9.2f} "
+        scores = noise_totals[n_noise]
+        if scores:
+            avg = sum(scores) / len(scores)
+            overall_row += f"{avg:>9.2f} "
+        else:
+            overall_row += f"{'N/A':>10}"
     print(overall_row)
     print("=" * len(header))
+    n_runs = max(len(v) for v in cells.values()) if cells else 0
     print(f"(Runs per cell: {n_runs}  |  Score range: 0-5)")
 
 
-# ---------------------------------------------------------------------------
+# ===================================================================
 # Entry point
-# ---------------------------------------------------------------------------
+# ===================================================================
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--model", default="qwen3-14b",
-                   help=f"Model preset: {', '.join(MODEL_CONFIGS.keys())}")
-    p.add_argument("--secret", default="affair",
-                   help="Secret type to test: affair | bribery | insider_trading | harassment | all")
-    p.add_argument("--n_noise", type=str, default="0",
-                   help="Comma-separated noise levels, e.g. '0,10,20,50,70,100'")
-    p.add_argument("--n_runs", type=int, default=10,
-                   help="Number of runs per secret+noise combination (results are averaged)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    # --- test subcommand ---
+    t = sub.add_parser("test", help="Run tester model on samples, save raw outputs to JSONL")
+    t.add_argument("--model", default=None,
+                   help=f"Tester model preset (vLLM local): {', '.join(MODEL_CONFIGS.keys())}")
+    t.add_argument("--model_api", default=None,
+                   help="Tester model name via API (e.g. gemma-3-27b-it)")
+    t.add_argument("--api_key", default=None,
+                   help="API key for tester API model (or set OPENAI_API_KEY env var)")
+    t.add_argument("--base_url", default=None,
+                   help="API base URL for tester API model (or set OPENAI_BASE_URL env var)")
+    t.add_argument("--secret", default="affair",
+                   help="Secret type: affair | bribery | insider_trading | harassment | all")
+    t.add_argument("--n_noise", type=str, default="0",
+                   help="Comma-separated noise levels, e.g. '0,10,20,50,100'")
+    t.add_argument("--n_runs", type=int, default=10,
+                   help="Number of runs per secret+noise combination")
+    t.add_argument("--output", default=None,
+                   help="Path to save JSONL output. Auto-generated if not specified.")
+
+    # --- evaluate subcommand ---
+    e = sub.add_parser("evaluate", help="Read JSONL, run judge, compute scores, print summary")
+    e.add_argument("--input", required=True,
+                   help="Path to JSONL file from test mode")
+    e.add_argument("--judge", default=None,
+                   help="Judge model. A preset name for local, or API model name with --judge_api")
+    e.add_argument("--judge_api", action="store_true",
+                   help="Use OpenAI-compatible API for judge model")
+    e.add_argument("--api_key", default=None,
+                   help="API key for judge (or set OPENAI_API_KEY env var)")
+    e.add_argument("--base_url", default=None,
+                   help="API base URL for judge (or set OPENAI_BASE_URL env var)")
+
     args = p.parse_args()
 
-    if args.secret == "all":
-        secret_ids = list(EASY_SECRETS.keys())
-    else:
-        if args.secret not in EASY_SECRETS:
-            raise ValueError(f"Unknown secret '{args.secret}'. Choose from: {list(EASY_SECRETS.keys())} or 'all'")
-        secret_ids = [args.secret]
-
-    noise_levels = [int(x.strip()) for x in args.n_noise.split(",")]
-
-    run_test(secret_ids=secret_ids, noise_levels=noise_levels, n_runs=args.n_runs, model_preset=args.model)
+    if args.command == "test":
+        cmd_test(args)
+    elif args.command == "evaluate":
+        cmd_evaluate(args)

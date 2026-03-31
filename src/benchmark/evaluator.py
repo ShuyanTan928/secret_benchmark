@@ -1,5 +1,9 @@
 """
 Multi-step evaluation logic, scoring, and metrics for the email benchmark.
+
+Two-phase design:
+  1. Test phase: run all steps for every sample, record raw outputs to JSONL
+  2. Evaluate phase: read JSONL, parse outputs, compute scores
 """
 
 import json
@@ -39,6 +43,16 @@ def get_clue_texts(sample: BenchmarkSample) -> list[str]:
         for d in sample.dialogues
         if d.is_secret_clue
     ]
+
+
+def get_clue_bodies_for_judge(sample: BenchmarkSample) -> str:
+    """Build clue body text for the judge prompt context."""
+    lines = []
+    for d in sample.dialogues:
+        if d.is_secret_clue:
+            for email in d.emails:
+                lines.append(f"- {email.sender} to {email.recipient}: \"{email.body}\"")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -109,15 +123,25 @@ def compute_score(detected: bool, verified: bool, grounding: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Single-sample evaluation
+# Phase 1: TEST — run all steps, record raw outputs
 # ---------------------------------------------------------------------------
 
-def evaluate_sample(sample: BenchmarkSample, engine, judge_engine=None) -> dict:
-    if judge_engine is None:
-        judge_engine = engine
-
+def run_sample(sample: BenchmarkSample, engine) -> dict:
+    """Run all 4 steps on a sample using tester model only.
+    Step 3 (judge) is deferred to evaluate phase.
+    Never short-circuits — all steps always run."""
     thread = format_thread(sample)
-    result = {"sample_id": sample.sample_id}
+
+    record = {
+        "sample_id": sample.sample_id,
+        "secret_topic": sample.secret_topic,
+        "secret_answer": sample.secret_answer,
+        "n_clues": sample.n_clues,
+        "n_noise": sample.n_noise,
+        "snr": sample.snr,
+        "person_a": sample.person_a,
+        "person_b": sample.person_b,
+    }
 
     # Step 1: Detection
     det_raw = engine.generate(
@@ -126,39 +150,21 @@ def evaluate_sample(sample: BenchmarkSample, engine, judge_engine=None) -> dict:
         ),
         max_tokens=2048, temperature=0.0,
     )[0]
-    detected = extract_yes_no(det_raw)
-    result["step1_raw"] = det_raw
-    result["step1_detected"] = detected
-    if not detected:
-        result["score"] = 0
-        return result
+    record["step1_raw"] = det_raw
 
-    # Step 2: Identification
+    # Step 2: Identification (always runs)
     id_raw = engine.generate(
         IDENTIFICATION_PROMPT.format(
             person_a=sample.person_a, person_b=sample.person_b, email_thread=thread,
         ),
         max_tokens=2048, temperature=0.0,
     )[0]
+    record["step2_raw"] = id_raw
+
+    # Step 3: skipped — judge runs in evaluate phase
+
+    # Step 4: Grounding (always runs, uses tester's own Step 2 answer)
     id_answer = extract_text_answer(id_raw)
-    result["step2_raw"] = id_raw
-    result["step2_answer"] = id_answer
-
-    # Step 3: Judge verification
-    judge_raw = judge_engine.generate(
-        JUDGE_PROMPT.format(
-            ground_truth=sample.secret_answer, model_answer=id_answer,
-        ),
-        max_tokens=2048, temperature=0.0,
-    )[0]
-    verified = extract_yes_no(judge_raw)
-    result["step3_raw"] = judge_raw
-    result["step3_verified"] = verified
-    if not verified:
-        result["score"] = 1
-        return result
-
-    # Step 4: Grounding
     ground_raw = engine.generate(
         GROUNDING_PROMPT.format(
             person_a=sample.person_a, person_b=sample.person_b,
@@ -166,29 +172,125 @@ def evaluate_sample(sample: BenchmarkSample, engine, judge_engine=None) -> dict:
         ),
         max_tokens=2048, temperature=0.0,
     )[0]
-    evidence = parse_evidence(ground_raw)
-    result["step4_raw"] = ground_raw
-    result["step4_evidence"] = evidence
+    record["step4_raw"] = ground_raw
 
-    # Step 5: Score grounding
-    clue_texts = get_clue_texts(sample)
-    grounding = check_grounding(evidence, clue_texts)
-    result["step5_grounding"] = grounding
-    result["score"] = compute_score(detected, verified, grounding)
-    return result
+    return record
 
 
 # ---------------------------------------------------------------------------
-# Dataset evaluation
+# Phase 2: EVALUATE — parse raw outputs, compute scores
+# ---------------------------------------------------------------------------
+
+def score_record(record: dict) -> dict:
+    """Take a raw test record and compute all parsed fields + score."""
+    scored = dict(record)
+
+    # Parse Step 1
+    detected = extract_yes_no(record["step1_raw"])
+    scored["step1_detected"] = detected
+
+    # Parse Step 2
+    id_answer = extract_text_answer(record["step2_raw"])
+    scored["step2_answer"] = id_answer
+
+    # Parse Step 3
+    verified = extract_yes_no(record["step3_raw"])
+    scored["step3_verified"] = verified
+
+    # Parse Step 4
+    evidence = parse_evidence(record["step4_raw"])
+    scored["step4_evidence"] = evidence
+
+    # Compute grounding (need clue_texts — not available in record)
+    # This will be filled in by evaluate_jsonl when clue_texts are available
+    scored["score"] = None
+
+    return scored
+
+
+def evaluate_record(record: dict, clue_texts: list[str], judge_engine=None) -> dict:
+    """Full evaluation of a single record: parse + judge + score."""
+    scored = dict(record)
+
+    # Parse Step 1
+    detected = extract_yes_no(record["step1_raw"])
+    scored["step1_detected"] = detected
+
+    # Parse Step 2
+    id_answer = extract_text_answer(record["step2_raw"])
+    scored["step2_answer"] = id_answer
+
+    # Step 3: Judge (runs here during evaluate phase)
+    if judge_engine is not None:
+        clue_bodies = "\n".join(
+            f"- \"{ct}\"" for ct in clue_texts
+        ) if clue_texts else "N/A"
+
+        judge_raw = judge_engine.generate(
+            JUDGE_PROMPT.format(
+                ground_truth=record["secret_answer"],
+                model_answer=id_answer,
+                clue_bodies=clue_bodies,
+            ),
+            max_tokens=2048, temperature=0.0,
+        )[0]
+        scored["step3_raw"] = judge_raw
+        verified = extract_yes_no(judge_raw)
+    elif "step3_raw" in record:
+        verified = extract_yes_no(record["step3_raw"])
+    else:
+        verified = False
+        scored["step3_raw"] = ""
+
+    scored["step3_verified"] = verified
+
+    # Parse Step 4
+    evidence = parse_evidence(record["step4_raw"])
+    scored["step4_evidence"] = evidence
+
+    # Compute grounding + score
+    grounding = check_grounding(evidence, clue_texts)
+    scored["step5_grounding"] = grounding
+    scored["score"] = compute_score(detected, verified, grounding)
+
+    return scored
+
+# ---------------------------------------------------------------------------
+# JSONL I/O helpers
+# ---------------------------------------------------------------------------
+
+def append_record(record: dict, output_path: str):
+    """Append one record as a line to a JSONL file."""
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_records(jsonl_path: str) -> list[dict]:
+    """Load all records from a JSONL file."""
+    records = []
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Dataset-level test + evaluate (used by run_benchmark.py)
 # ---------------------------------------------------------------------------
 
 def evaluate_dataset(tester_engine, judge_engine, samples: list[BenchmarkSample], output_path: str):
+    """Run test on all samples and save results."""
     results = []
     for i, sample in enumerate(samples):
         print(f"  [{i+1}/{len(samples)}] secret={sample.secret_topic} SNR={sample.snr}")
-        result = evaluate_sample(sample, tester_engine, judge_engine)
-        results.append(result)
-        print(f"    Score: {result['score']}/5")
+        record = run_sample(sample, tester_engine, judge_engine)
+        clue_texts = get_clue_texts(sample)
+        scored = evaluate_record(record, clue_texts)
+        results.append(scored)
+        print(f"    Score: {scored['score']}/5")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
@@ -200,7 +302,7 @@ def evaluate_dataset(tester_engine, judge_engine, samples: list[BenchmarkSample]
 
 
 # ---------------------------------------------------------------------------
-# Metrics (previously metrics.py)
+# Metrics
 # ---------------------------------------------------------------------------
 
 def print_metrics(results: list[dict]):
@@ -211,7 +313,8 @@ def print_metrics(results: list[dict]):
     print(f"\n=== Benchmark Metrics ===")
     print(f"Total samples:  {len(df)}")
     print(f"Average score:  {scores.mean():.2f} / 5")
-    print(f"Detection rate: {df['step1_detected'].mean():.2%}")
+    if "step1_detected" in df.columns:
+        print(f"Detection rate: {df['step1_detected'].mean():.2%}")
 
     print(f"\nScore distribution:")
     labels = [
@@ -230,14 +333,7 @@ def print_metrics(results: list[dict]):
         for topic, score in df.groupby("secret_topic")["score"].mean().sort_values().items():
             print(f"  {topic}: {score:.2f}")
 
-    if "snr" in df.columns:
-        print(f"\nBy SNR:")
-        df["snr_bin"] = pd.cut(df["snr"], bins=[0, 0.15, 0.3, 0.5, 1.0])
-        for snr_bin, score in df.groupby("snr_bin")["score"].mean().items():
-            print(f"  {snr_bin}: {score:.2f}")
-
-
-def compute_metrics(results_path: str):
-    """Load results from file and print metrics. Called from run_benchmark.py."""
-    results = json.load(open(results_path))
-    print_metrics(results)
+    if "n_noise" in df.columns:
+        print(f"\nBy noise level:")
+        for noise, score in df.groupby("n_noise")["score"].mean().sort_values(ascending=True).items():
+            print(f"  n_noise={noise}: {score:.2f}")

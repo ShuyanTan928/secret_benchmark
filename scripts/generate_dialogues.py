@@ -11,7 +11,7 @@ import argparse, json
 from pathlib import Path
 
 from src.models.vllm_engine import VLLMEngine
-from src.data_utils.topic_sampler import load_secrets, load_noise_topics
+from src.data_utils.topic_sampler import load_clue_breakdowns, load_noise_topics
 from src.generation.dialogue_generator import generate_all_secret_dialogues
 from src.generation.noise_generator import generate_noise_pool
 
@@ -23,9 +23,9 @@ def main(args):
 
     if not args.only_noise:
         print("Generating secret clue dialogues...")
-        secrets = load_secrets()
+        secrets = load_clue_breakdowns()
         secret_dialogues = generate_all_secret_dialogues(engine, secrets)
-        out_path = out_dir / "generated_secrets.jsonl"
+        out_path = out_dir / "secret_emails.jsonl"
         with open(out_path, "w") as f:
             for secret_id, dialogues in secret_dialogues.items():
                 for dlg in dialogues:
@@ -36,7 +36,7 @@ def main(args):
         print(f"Generating noise pool...")
         noise_topics = load_noise_topics()
         noise_pool = generate_noise_pool(engine, noise_topics, n_per_topic=args.n_per_topic)
-        out_path = out_dir / "generated_noise.jsonl"
+        out_path = out_dir / "noise_emails.jsonl"
         with open(out_path, "w") as f:
             for dlg in noise_pool:
                 f.write(dlg.model_dump_json() + "\n")
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     p.add_argument("--model", default="Qwen/Qwen3-14B")
     p.add_argument("--tp", type=int, default=1)
     p.add_argument("--n_per_topic", type=int, default=3)
-    p.add_argument("--output_dir", default="outputs/generated")
+    p.add_argument("--output_dir", default="benchmark_pool")
     p.add_argument("--only_secrets", action="store_true")
     p.add_argument("--only_noise", action="store_true")
     main(p.parse_args())

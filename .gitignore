@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets & credentials
+secrets.json
+data/secrets.json.bak
+.env
+
+# Old / archived
+old_results/
+
+# Experimental / utility (not part of main pipeline)
+test_multiperson.py
+plot_results.py
+print_results.py
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

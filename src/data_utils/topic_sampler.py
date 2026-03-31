@@ -1,7 +1,8 @@
 import json, random
 from pathlib import Path
 
-SECRETS_PATH = Path("data/secrets.json")
+SECRET_TOPICS_PATH = Path("data/secret_topics.json")
+CLUE_BREAKDOWNS_PATH = Path("data/secret_clue_breakdowns.json")
 NOISE_PATH = Path("data/noise_topics.json")
 
 DEFAULT_NOISE = [
@@ -10,25 +11,30 @@ DEFAULT_NOISE = [
 ]
 
 
-def load_secrets():
-    """Load secrets from JSON. Each secret must have 'clue_breakdown' field."""
-    if not SECRETS_PATH.exists():
-        raise FileNotFoundError(
-            f"{SECRETS_PATH} not found. Please create it with clue_breakdown fields."
-        )
-    secrets = json.loads(SECRETS_PATH.read_text())
+def load_secret_topics() -> list[dict]:
+    """Load secret topic list (id, label, n_clues). No clue details."""
+    if not SECRET_TOPICS_PATH.exists():
+        raise FileNotFoundError(f"{SECRET_TOPICS_PATH} not found.")
+    return json.loads(SECRET_TOPICS_PATH.read_text())
+
+
+def load_clue_breakdowns() -> list[dict]:
+    """Load full secret definitions including clue_breakdown lists."""
+    if not CLUE_BREAKDOWNS_PATH.exists():
+        raise FileNotFoundError(f"{CLUE_BREAKDOWNS_PATH} not found.")
+    secrets = json.loads(CLUE_BREAKDOWNS_PATH.read_text())
     for s in secrets:
         if "clue_breakdown" not in s or len(s["clue_breakdown"]) == 0:
             raise ValueError(f"Secret '{s['id']}' is missing 'clue_breakdown' field.")
     return secrets
 
 
-def load_noise_topics():
+def load_noise_topics() -> list[str]:
     return json.loads(NOISE_PATH.read_text()) if NOISE_PATH.exists() else DEFAULT_NOISE
 
 
 def sample_secret():
-    return random.choice(load_secrets())
+    return random.choice(load_clue_breakdowns())
 
 
 def sample_noise_topics(n: int):

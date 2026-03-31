@@ -17,10 +17,10 @@ from src.data_utils.topic_sampler import load_secrets
 from src.generation.combiner import combine
 
 
-GENERATED_DIR = Path("outputs/generated")
+GENERATED_DIR = Path("benchmark_pool")
 
 
-def load_generated_secrets(path: Path) -> dict:
+def load_secret_emails(path: Path) -> dict:
     result = {}
     for line in open(path):
         record = json.loads(line)
@@ -29,13 +29,13 @@ def load_generated_secrets(path: Path) -> dict:
     return result
 
 
-def load_generated_noise(path: Path) -> list:
+def load_noise_emails(path: Path) -> list:
     return [EmailDialogue(**json.loads(line)) for line in open(path)]
 
 
 def assemble_samples(n_samples: int, n_noise_arg: str) -> list:
-    secret_dialogues = load_generated_secrets(GENERATED_DIR / "generated_secrets.jsonl")
-    noise_pool = load_generated_noise(GENERATED_DIR / "generated_noise.jsonl")
+    secret_dialogues = load_secret_emails(GENERATED_DIR / "secret_emails.jsonl")
+    noise_pool = load_noise_emails(GENERATED_DIR / "noise_emails.jsonl")
     secrets = load_secrets()
 
     noise_parts = [int(x) for x in n_noise_arg.split("-")]
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     p.add_argument("--n_noise", default="10",
                    help="Noise dialogues injected per sample. Fixed (e.g. '10') or "
                         "random range (e.g. '5-15'). Higher = harder, lower SNR")
-    p.add_argument("--output", default="outputs/results/run1.json",
+    p.add_argument("--output", default="results/run1.json",
                    help="Path to save evaluation results JSON")
     args = p.parse_args()
 

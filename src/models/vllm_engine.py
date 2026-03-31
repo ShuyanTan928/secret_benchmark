@@ -7,6 +7,7 @@ Key design decisions:
     throughout the pipeline (no special tokens in eval_prompts.py)
   - Supports quantization (4bit/8bit) via GPTQ/AWQ/FP8 for larger models
   - Pre-defined model configs with model-specific system prompts and sampling
+  - Reasoning model output cleaning (Phi-4: <think>, GPT-oss: assistantfinal)
 """
 
 import re
@@ -42,15 +43,6 @@ PHI4_REASONING_SYSTEM_PROMPT = (
 
 # ---------------------------------------------------------------------------
 # Pre-defined model configs
-#
-# Each config can specify:
-#   model_name          - HuggingFace model ID
-#   tensor_parallel_size - number of GPUs
-#   max_model_len       - context window
-#   quantization        - None, "gptq_marlin", "fp8", etc.
-#   is_reasoning        - True for models that output <think>...</think>
-#   system_prompt       - model-specific system prompt (None = no system msg)
-#   sampling            - model-specific default sampling overrides
 # ---------------------------------------------------------------------------
 MODEL_CONFIGS = {
     # ---- Qwen3 family ----
@@ -65,6 +57,24 @@ MODEL_CONFIGS = {
         "tensor_parallel_size": 1,
         "max_model_len": 32768,
         "quantization": None,
+    },
+    "qwen3-32b-4bit": {
+        "model_name": "JunHowie/Qwen3-32B-GPTQ-Int4",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": "gptq_marlin",
+    },
+    "qwen3-32b-8bit": {
+        "model_name": "JunHowie/Qwen3-32B-GPTQ-Int8",
+        "tensor_parallel_size": 1,
+        "max_model_len": 4096,
+        "quantization": "gptq_marlin",
+    },
+    "qwen3-32b-fp8": {
+        "model_name": "pytorch/Qwen3-32B-FP8",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": "torchao",
     },
     "qwen3-235b-4bit": {
         "model_name": "Qwen/Qwen3-235B-A22B-GPTQ-Int4",
@@ -99,17 +109,61 @@ MODEL_CONFIGS = {
         "quantization": None,
     },
 
-    # ---- GPT-oss-120B (117B dense) ----
+    # ---- GPT-oss-120B (117B dense, reasoning model) ----
     "gpt-oss-120b": {
         "model_name": "openai/GPT-oss-120B",
         "tensor_parallel_size": 4,
+        "max_model_len": 131072,
+        "quantization": None,
+        "is_reasoning": True,
+        "reasoning_format": "gptoss",
+    },
+
+    # ---- Gemma 3 family ----
+    "gemma3-27b": {
+        "model_name": "google/gemma-3-27b-it",
+        "tensor_parallel_size": 1,
         "max_model_len": 32768,
         "quantization": None,
     },
+    "gemma3-12b": {
+        "model_name": "google/gemma-3-12b-it",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": None,
+    },
+    "gemma3-4b": {
+        "model_name": "google/gemma-3-4b-it",
+        "tensor_parallel_size": 1,
+        "max_model_len": 131072,
+        "quantization": None,
+    },
 
-    # ---- Gemma 3 27B (27B dense) ----
-    "gemma3-27b": {
-        "model_name": "google/gemma-3-27b-it",
+    # ---- GPT-oss 20B (MoE, 20B total) ----
+    "gpt-oss-20b": {
+        "model_name": "openai/gpt-oss-20b",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": None,
+        "is_reasoning": True,
+        "reasoning_format": "gptoss",
+    },
+
+    # ---- Qwen 3.5 family ----
+    "qwen3.5-27b": {
+        "model_name": "Qwen/Qwen3.5-27B",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": None,
+    },
+    "qwen3.5-9b": {
+        "model_name": "Qwen/Qwen3.5-9B",
+        "tensor_parallel_size": 1,
+        "max_model_len": 32768,
+        "quantization": None,
+    },
+    "qwen3.5-4b": {
+        "model_name": "Qwen/Qwen3.5-4B",
         "tensor_parallel_size": 1,
         "max_model_len": 32768,
         "quantization": None,
@@ -122,6 +176,7 @@ MODEL_CONFIGS = {
         "max_model_len": 32768,
         "quantization": None,
         "is_reasoning": True,
+        "reasoning_format": "phi4",
         "system_prompt": PHI4_REASONING_SYSTEM_PROMPT,
         "sampling": {
             "temperature": 0.8,
@@ -155,12 +210,14 @@ class VLLMEngine:
         enable_thinking: bool = False,
         quantization: str | None = None,
         is_reasoning: bool = False,
+        reasoning_format: str | None = None,
         system_prompt: str | None = None,
         default_sampling: dict | None = None,
     ):
         self.model_name = model_name
         self.enable_thinking = enable_thinking
         self.is_reasoning = is_reasoning
+        self.reasoning_format = reasoning_format
         self.system_prompt = system_prompt
         self.default_sampling = default_sampling or {}
 
@@ -188,15 +245,7 @@ class VLLMEngine:
         enable_thinking: bool = False,
         **overrides,
     ) -> "VLLMEngine":
-        """Create engine from a pre-defined model config.
-
-        Usage:
-            engine = VLLMEngine.from_preset("qwen3-235b-4bit")
-            engine = VLLMEngine.from_preset("phi4-reasoning-plus")
-
-        Override any config value:
-            engine = VLLMEngine.from_preset("qwen3-235b-4bit", max_model_len=16384)
-        """
+        """Create engine from a pre-defined model config."""
         if preset not in MODEL_CONFIGS:
             raise ValueError(
                 f"Unknown preset '{preset}'. Available presets:\n{list_presets()}"
@@ -211,9 +260,14 @@ class VLLMEngine:
             enable_thinking=enable_thinking,
             quantization=config.get("quantization"),
             is_reasoning=config.get("is_reasoning", False),
+            reasoning_format=config.get("reasoning_format"),
             system_prompt=config.get("system_prompt"),
             default_sampling=config.get("sampling"),
         )
+
+    # ------------------------------------------------------------------
+    # Chat template
+    # ------------------------------------------------------------------
 
     def _apply_chat_template(self, prompt: str) -> str:
         """Format prompt with chat template, including system prompt if set."""
@@ -222,7 +276,6 @@ class VLLMEngine:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        # Phi-4 reasoning doesn't use enable_thinking kwarg
         if self.is_reasoning:
             formatted = self.tokenizer.apply_chat_template(
                 messages,
@@ -238,23 +291,47 @@ class VLLMEngine:
             )
         return formatted
 
+    # ------------------------------------------------------------------
+    # Output cleaning for reasoning models
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _strip_thinking(text: str) -> str:
-        """Remove <think>...</think> blocks from reasoning model output.
-        Handles both closed and unclosed think tags."""
-        # Case 1: closed <think>...</think> — extract content after it
+        """Remove <think>...</think> blocks from Phi-4 reasoning output."""
         match_closed = re.search(r"</think>\s*(.*)", text, flags=re.DOTALL)
         if match_closed and match_closed.group(1).strip():
             return match_closed.group(1).strip()
 
-        # Case 2: no </think> found — model ran out of tokens while thinking
-        # Remove everything from <think> onward
         stripped = re.sub(r"<think>.*", "", text, flags=re.DOTALL).strip()
         if stripped:
             return stripped
 
-        # Case 3: entire output is inside <think> with no answer
         return ""
+
+    @staticmethod
+    def _strip_gptoss(text: str) -> str:
+        """Extract final answer from GPT-oss output (assistantfinal format)."""
+        match = re.search(r"assistantfinal\s*(.*)", text, flags=re.DOTALL)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+        return text
+
+    def _clean_output(self, text: str) -> str:
+        """Clean model output based on reasoning format."""
+        if not self.is_reasoning:
+            return text
+
+        if self.reasoning_format == "gptoss":
+            return self._strip_gptoss(text)
+        elif self.reasoning_format == "phi4":
+            clean = self._strip_thinking(text)
+            return clean if clean else text
+        else:
+            return text
+
+    # ------------------------------------------------------------------
+    # Generation
+    # ------------------------------------------------------------------
 
     def generate(
         self,
@@ -271,15 +348,13 @@ class VLLMEngine:
         else:
             prompts = prompt
 
-        # Apply chat template to each prompt
         formatted_prompts = [self._apply_chat_template(p) for p in prompts]
 
         # Reasoning models need more tokens for the thinking chain
         if self.is_reasoning and max_tokens < 16384:
             max_tokens = 16384
 
-        # Apply model-specific sampling defaults, then caller overrides
-        # Priority: model defaults < caller args (if non-default)
+        # Apply model-specific sampling defaults
         final_temp = self.default_sampling.get("temperature", temperature)
         final_top_p = self.default_sampling.get("top_p", top_p)
         final_top_k = self.default_sampling.get("top_k", top_k)
@@ -311,10 +386,8 @@ class VLLMEngine:
         results = []
         for output in outputs:
             text = output.outputs[0].text
-            # Strip thinking traces from reasoning models
             if self.is_reasoning:
-                clean = self._strip_thinking(text)
-                text = clean if clean else text
+                text = self._clean_output(text)
             results.append(text)
 
         return results
