@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Benchmark for testing LLM ability to detect hidden secrets in long email chains"
 requires-python = ">=3.10"
 dependencies = [
-    "vllm>=0.4.0",
-    "transformers>=4.40.0",
+    "vllm==0.17.1",
+    "transformers>=4.40.0,<5.0",
     "huggingface_hub>=0.22.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
@@ -17,4 +17,9 @@ dependencies = [
     "jsonlines>=4.0",
     "python-dotenv>=1.0",
     "matplotlib>=3.8",
+]
+
+[dependency-groups]
+dev = [
+    "gpustat>=1.1.1",
 ]

@@ -153,7 +153,7 @@ MODEL_CONFIGS = {
     "qwen3.5-27b": {
         "model_name": "Qwen/Qwen3.5-27B",
         "tensor_parallel_size": 1,
-        "max_model_len": 32768,
+        "max_model_len": 131072,
         "quantization": None,
     },
     "qwen3.5-9b": {
