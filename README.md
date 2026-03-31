@@ -6,9 +6,7 @@ A benchmark for testing LLM ability to detect hidden secrets embedded across lon
 
 ## Setup
 ```bash
-uv venv .venv
-source .venv/bin/activate
-uv pip install -r requirements.txt
+uv sync
 ```
 
 ---

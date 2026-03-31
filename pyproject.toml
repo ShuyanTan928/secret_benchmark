@@ -1,0 +1,20 @@
+[project]
+name = "secret-benchmark"
+version = "0.1.0"
+description = "Benchmark for testing LLM ability to detect hidden secrets in long email chains"
+requires-python = ">=3.10"
+dependencies = [
+    "vllm>=0.4.0",
+    "transformers>=4.40.0",
+    "huggingface_hub>=0.22.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "datasets>=2.18",
+    "openai>=1.0",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "jsonlines>=4.0",
+    "python-dotenv>=1.0",
+    "matplotlib>=3.8",
+]
